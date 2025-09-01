@@ -1,0 +1,5181 @@
+import React, { useState, useEffect, useMemo, useCallback } from "react";
+import {
+  Home,
+  Building2,
+  TrendingUp,
+  Receipt,
+  Calculator,
+  BarChart,
+  Calendar,
+  Plus,
+  Edit,
+  Trash2,
+  ArrowUp,
+  ArrowDown,
+  DollarSign,
+  Target,
+  AlertTriangle,
+  PieChart,
+  LineChart,
+  FileText,
+  Download,
+  Upload,
+  Search,
+  Filter,
+  Eye,
+  Wallet,
+  CreditCard,
+  Banknote,
+  TrendingDown,
+  CheckCircle,
+  X,
+  Save,
+  Copy,
+  RefreshCw,
+  Bell,
+  MoreHorizontal,
+} from "lucide-react";
+import {
+  PieChart as RechartsPieChart,
+  Pie,
+  Cell,
+  BarChart as RechartsBarChart,
+  Bar,
+  LineChart as RechartsLineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ResponsiveContainer,
+  ComposedChart,
+  Area,
+  AreaChart,
+} from "recharts";
+import * as XLSX from 'xlsx';
+
+// ==================== TYPES & INTERFACES ====================
+interface CompteBancaire {
+  id: string;
+  nom: string;
+  banque: string;
+  type: "courant" | "epargne" | "livret" | "cash";
+  solde: number;
+  devise: string;
+  couleur: string;
+  actif: boolean;
+  dateCreation: Date;
+}
+
+interface Transaction {
+  id: string;
+  date: Date;
+  montant: number;
+  type: "entree" | "depense" | "transfert";
+  categorie: string;
+  sousCategorie?: string;
+  description: string;
+  compte: string;
+  recurrente: boolean;
+  tags?: string[];
+}
+
+interface Categorie {
+  id: string;
+  nom: string;
+  type: "entree" | "depense";
+  couleur: string;
+  icone: string;
+  budgetMensuel?: number;
+}
+
+interface DepensePrevisionnelle {
+  id: string;
+  nom: string;
+  montant: number;
+  type: "depense" | "entree";
+  categorie: string;
+  compte: string;
+  statut: "en_cours" | "effectuee";
+  datePrevue: Date;
+  dateRealisee?: Date;
+  recurrente: boolean;
+  notes?: string;
+}
+
+interface ObjectifFinancier {
+  id: string;
+  nom: string;
+  type: "epargne" | "achat";
+  montantCible: number;
+  montantActuel: number;
+  dateEcheance: Date;
+  compte: string;
+  statut: "en_cours" | "atteint" | "abandonne";
+  contributionMensuelle?: number;
+  notes?: string;
+}
+
+interface AppData {
+  comptes: CompteBancaire[];
+  transactions: Transaction[];
+  categories: Categorie[];
+  depensesPrevisionnelles: DepensePrevisionnelle[];
+  objectifsFinanciers: ObjectifFinancier[];
+  settings: {
+    theme: "light" | "dark";
+    devise: string;
+    startOfWeek: number;
+  };
+}
+
+// ==================== CONSTANTS & DEFAULT DATA ====================
+const COULEURS_THEME = [
+  "#10b981",
+  "#f59e0b",
+  "#ef4444",
+  "#6366f1",
+  "#8b5cf6",
+  "#06b6d4",
+  "#84cc16",
+  "#f97316",
+  "#ec4899",
+  "#64748b",
+];
+
+// ==================== CURRENCY EXCHANGE SYSTEM ====================
+interface ExchangeRates {
+  [key: string]: number;
+}
+
+interface CurrencyCache {
+  rates: ExchangeRates;
+  lastUpdated: number;
+  baseCurrency: string;
+}
+
+const CURRENCY_API_KEY = 'demo-key'; // Remplacer par une vraie clé API
+const CACHE_DURATION = 3600000; // 1 heure en millisecondes
+
+// Taux de change par défaut (FCFA comme base)
+const DEFAULT_RATES: ExchangeRates = {
+  XOF: 1,        // FCFA (base)
+  EUR: 0.00152,  // 1 FCFA = 0.00152 EUR
+  USD: 0.00164,  // 1 FCFA = 0.00164 USD
+  GBP: 0.00129,  // 1 FCFA = 0.00129 GBP
+  MAD: 0.0164,   // 1 FCFA = 0.0164 MAD
+  TND: 0.00503,  // 1 FCFA = 0.00503 TND
+};
+
+const currencyService = {
+  // Récupérer les taux de change depuis l'API
+  async fetchExchangeRates(baseCurrency = 'XOF'): Promise<ExchangeRates> {
+    try {
+      // Utiliser plusieurs APIs en fallback
+      const apis = [
+        `https://api.exchangerate-api.com/v4/latest/${baseCurrency}`,
+        `https://api.fixer.io/latest?base=${baseCurrency}&access_key=${CURRENCY_API_KEY}`,
+        `https://open.er-api.com/v6/latest/${baseCurrency}`
+      ];
+
+      for (const apiUrl of apis) {
+        try {
+          const response = await fetch(apiUrl);
+          if (response.ok) {
+            const data = await response.json();
+            return data.rates || data.conversion_rates || DEFAULT_RATES;
+          }
+        } catch (error) {
+          console.warn(`Échec de l'API: ${apiUrl}`, error);
+          continue;
+        }
+      }
+      
+      throw new Error('Toutes les APIs ont échoué');
+    } catch (error) {
+      console.warn('Utilisation des taux par défaut:', error);
+      return DEFAULT_RATES;
+    }
+  },
+
+  // Charger les taux depuis le cache ou l'API
+  async getExchangeRates(baseCurrency = 'XOF'): Promise<ExchangeRates> {
+    const cached = this.getCachedRates();
+    
+    if (cached && 
+        cached.baseCurrency === baseCurrency && 
+        Date.now() - cached.lastUpdated < CACHE_DURATION) {
+      return cached.rates;
+    }
+
+    const rates = await this.fetchExchangeRates(baseCurrency);
+    this.cacheRates(rates, baseCurrency);
+    return rates;
+  },
+
+  // Mettre en cache les taux
+  cacheRates(rates: ExchangeRates, baseCurrency: string): void {
+    const cache: CurrencyCache = {
+      rates,
+      lastUpdated: Date.now(),
+      baseCurrency
+    };
+    localStorage.setItem('currencyCache', JSON.stringify(cache));
+  },
+
+  // Récupérer les taux mis en cache
+  getCachedRates(): CurrencyCache | null {
+    try {
+      const cached = localStorage.getItem('currencyCache');
+      return cached ? JSON.parse(cached) : null;
+    } catch {
+      return null;
+    }
+  },
+
+  // Convertir un montant d'une devise à une autre
+  convertAmount(amount: number, fromCurrency: string, toCurrency: string, rates: ExchangeRates): number {
+    if (fromCurrency === toCurrency) return amount;
+    
+    // Convertir vers la devise de base (XOF) puis vers la devise cible
+    const baseAmount = fromCurrency === 'XOF' ? amount : amount / rates[fromCurrency];
+    const convertedAmount = toCurrency === 'XOF' ? baseAmount : baseAmount * rates[toCurrency];
+    
+    return Math.round(convertedAmount * 100) / 100; // Arrondir à 2 décimales
+  },
+
+  // Convertir toutes les données financières
+  convertAppData(data: AppData, oldCurrency: string, newCurrency: string, rates: ExchangeRates): AppData {
+    if (oldCurrency === newCurrency) return data;
+
+    const convertAmount = (amount: number) => 
+      this.convertAmount(amount, oldCurrency, newCurrency, rates);
+
+    return {
+      ...data,
+      comptes: data.comptes.map(compte => ({
+        ...compte,
+        solde: convertAmount(compte.solde),
+        devise: newCurrency
+      })),
+      transactions: data.transactions.map(transaction => ({
+        ...transaction,
+        montant: convertAmount(transaction.montant)
+      })),
+      depensesPrevisionnelles: data.depensesPrevisionnelles.map(depense => ({
+        ...depense,
+        montant: convertAmount(depense.montant)
+      })),
+      objectifsFinanciers: data.objectifsFinanciers.map(objectif => ({
+        ...objectif,
+        montantCible: convertAmount(objectif.montantCible),
+        montantActuel: convertAmount(objectif.montantActuel),
+        contributionMensuelle: objectif.contributionMensuelle 
+          ? convertAmount(objectif.contributionMensuelle) 
+          : undefined
+      })),
+      categories: data.categories.map(categorie => ({
+        ...categorie,
+        budgetMensuel: categorie.budgetMensuel 
+          ? convertAmount(categorie.budgetMensuel) 
+          : undefined
+      })),
+      settings: {
+        ...data.settings,
+        devise: newCurrency
+      }
+    };
+  }
+};
+
+const CATEGORIES_DEFAUT: Categorie[] = [
+  {
+    id: "1",
+    nom: "Salaire",
+    type: "entree",
+    couleur: "#10b981",
+    icone: "DollarSign",
+    budgetMensuel: 1800000, // 1,800,000 FCFA
+  },
+  {
+    id: "2",
+    nom: "Freelance",
+    type: "entree",
+    couleur: "#059669",
+    icone: "TrendingUp",
+  },
+  {
+    id: "3",
+    nom: "Alimentation",
+    type: "depense",
+    couleur: "#f59e0b",
+    icone: "Receipt",
+    budgetMensuel: 250000, // 250,000 FCFA
+  },
+  {
+    id: "4",
+    nom: "Logement",
+    type: "depense",
+    couleur: "#ef4444",
+    icone: "Home",
+    budgetMensuel: 500000, // 500,000 FCFA
+  },
+  {
+    id: "5",
+    nom: "Transport",
+    type: "depense",
+    couleur: "#8b5cf6",
+    icone: "ArrowUpDown",
+    budgetMensuel: 120000, // 120,000 FCFA
+  },
+  {
+    id: "6",
+    nom: "Loisirs",
+    type: "depense",
+    couleur: "#06b6d4",
+    icone: "Target",
+    budgetMensuel: 180000, // 180,000 FCFA
+  },
+  {
+    id: "7",
+    nom: "Santé",
+    type: "depense",
+    couleur: "#84cc16",
+    icone: "Heart",
+    budgetMensuel: 90000, // 90,000 FCFA
+  },
+  {
+    id: "8",
+    nom: "Shopping",
+    type: "depense",
+    couleur: "#f97316",
+    icone: "ShoppingBag",
+    budgetMensuel: 120000, // 120,000 FCFA
+  },
+];
+
+const DONNEES_DEMO: AppData = {
+  comptes: [
+    {
+      id: "1",
+      nom: "Compte Courant",
+      banque: "Ecobank",
+      type: "courant",
+      solde: 1475000, // 1,475,000 FCFA
+      devise: "XOF",
+      couleur: "#10b981",
+      actif: true,
+      dateCreation: new Date("2024-01-01"),
+    },
+    {
+      id: "2",
+      nom: "Compte Épargne",
+      banque: "BOA",
+      type: "epargne",
+      solde: 7500000, // 7,500,000 FCFA
+      devise: "XOF",
+      couleur: "#f59e0b",
+      actif: true,
+      dateCreation: new Date("2024-01-01"),
+    },
+    {
+      id: "3",
+      nom: "Livret",
+      banque: "UBA",
+      type: "livret",
+      solde: 5250000, // 5,250,000 FCFA
+      devise: "XOF",
+      couleur: "#6366f1",
+      actif: true,
+      dateCreation: new Date("2024-01-01"),
+    },
+  ],
+  transactions: [
+    // Transactions août 2025 (mois actuel)
+    {
+      id: "1",
+      date: new Date("2025-08-25"),
+      montant: 1800000, // 1,800,000 FCFA
+      type: "entree",
+      categorie: "Salaire",
+      description: "Salaire août 2025",
+      compte: "1",
+      recurrente: true,
+    },
+    {
+      id: "2",
+      date: new Date("2025-08-24"),
+      montant: -52500, // -52,500 FCFA
+      type: "depense",
+      categorie: "Alimentation",
+      description: "Courses Carrefour",
+      compte: "1",
+      recurrente: false,
+    },
+    {
+      id: "3",
+      date: new Date("2025-08-23"),
+      montant: -400000, // -400,000 FCFA
+      type: "depense",
+      categorie: "Logement",
+      description: "Loyer août",
+      compte: "1",
+      recurrente: true,
+    },
+    {
+      id: "4",
+      date: new Date("2025-08-20"),
+      montant: -27000, // -27,000 FCFA
+      type: "depense",
+      categorie: "Transport",
+      description: "Essence",
+      compte: "1",
+      recurrente: false,
+    },
+    {
+      id: "5",
+      date: new Date("2025-08-18"),
+      montant: -72000, // -72,000 FCFA
+      type: "depense",
+      categorie: "Loisirs",
+      description: "Restaurant",
+      compte: "1",
+      recurrente: false,
+    },
+    {
+      id: "6",
+      date: new Date("2025-08-15"),
+      montant: 300000, // 300,000 FCFA
+      type: "entree",
+      categorie: "Freelance",
+      description: "Mission freelance",
+      compte: "1",
+      recurrente: false,
+    },
+    {
+      id: "7",
+      date: new Date("2025-08-10"),
+      montant: -90000, // -90,000 FCFA
+      type: "depense",
+      categorie: "Shopping",
+      description: "Vêtements",
+      compte: "1",
+      recurrente: false,
+    },
+    // Transactions juillet 2025
+    {
+      id: "8",
+      date: new Date("2025-07-25"),
+      montant: 1800000,
+      type: "entree",
+      categorie: "Salaire",
+      description: "Salaire juillet 2025",
+      compte: "1",
+      recurrente: true,
+    },
+    {
+      id: "9",
+      date: new Date("2025-07-23"),
+      montant: -400000,
+      type: "depense",
+      categorie: "Logement",
+      description: "Loyer juillet",
+      compte: "1",
+      recurrente: true,
+    },
+    {
+      id: "10",
+      date: new Date("2025-07-20"),
+      montant: -120000,
+      type: "depense",
+      categorie: "Alimentation",
+      description: "Courses mensuelles",
+      compte: "1",
+      recurrente: false,
+    },
+    {
+      id: "11",
+      date: new Date("2025-07-15"),
+      montant: -48000,
+      type: "depense",
+      categorie: "Santé",
+      description: "Pharmacie",
+      compte: "1",
+      recurrente: false,
+    },
+    // Transactions juin 2025
+    {
+      id: "12",
+      date: new Date("2025-06-25"),
+      montant: 1800000,
+      type: "entree",
+      categorie: "Salaire",
+      description: "Salaire juin 2025",
+      compte: "1",
+      recurrente: true,
+    },
+    {
+      id: "13",
+      date: new Date("2025-06-23"),
+      montant: -400000,
+      type: "depense",
+      categorie: "Logement",
+      description: "Loyer juin",
+      compte: "1",
+      recurrente: true,
+    },
+    {
+      id: "14",
+      date: new Date("2025-06-10"),
+      montant: -180000,
+      type: "depense",
+      categorie: "Transport",
+      description: "Réparation voiture",
+      compte: "1",
+      recurrente: false,
+    },
+    // Transactions mai 2025
+    {
+      id: "15",
+      date: new Date("2025-05-25"),
+      montant: 1800000,
+      type: "entree",
+      categorie: "Salaire",
+      description: "Salaire mai 2025",
+      compte: "1",
+      recurrente: true,
+    },
+    {
+      id: "16",
+      date: new Date("2025-05-23"),
+      montant: -400000,
+      type: "depense",
+      categorie: "Logement",
+      description: "Loyer mai",
+      compte: "1",
+      recurrente: true,
+    },
+    {
+      id: "17",
+      date: new Date("2025-05-15"),
+      montant: -150000,
+      type: "depense",
+      categorie: "Loisirs",
+      description: "Weekend sorties",
+      compte: "1",
+      recurrente: false,
+    },
+    // Transactions avril 2025
+    {
+      id: "18",
+      date: new Date("2025-04-25"),
+      montant: 1800000,
+      type: "entree",
+      categorie: "Salaire",
+      description: "Salaire avril 2025",
+      compte: "1",
+      recurrente: true,
+    },
+    {
+      id: "19",
+      date: new Date("2025-04-23"),
+      montant: -400000,
+      type: "depense",
+      categorie: "Logement",
+      description: "Loyer avril",
+      compte: "1",
+      recurrente: true,
+    },
+    {
+      id: "20",
+      date: new Date("2025-04-10"),
+      montant: -108000,
+      type: "depense",
+      categorie: "Alimentation",
+      description: "Courses diverses",
+      compte: "1",
+      recurrente: false,
+    },
+  ],
+  depensesPrevisionnelles: [
+    {
+      id: "1",
+      nom: "Loyer septembre",
+      montant: 400000, // 400,000 FCFA
+      type: "depense",
+      categorie: "Logement",
+      compte: "1",
+      statut: "en_cours",
+      datePrevue: new Date("2025-09-01"),
+      recurrente: true,
+      notes: "Loyer mensuel récurrent",
+    },
+    {
+      id: "2",
+      nom: "Assurance auto",
+      montant: 51000, // 51,000 FCFA
+      type: "depense",
+      categorie: "Transport",
+      compte: "1",
+      statut: "en_cours",
+      datePrevue: new Date("2025-09-15"),
+      recurrente: true,
+    },
+    {
+      id: "3",
+      nom: "Salaire septembre",
+      montant: 1800000, // 1,800,000 FCFA
+      type: "entree",
+      categorie: "Salaire",
+      compte: "1",
+      statut: "en_cours",
+      datePrevue: new Date("2025-09-25"),
+      recurrente: true,
+    },
+    {
+      id: "4",
+      nom: "Facture électricité",
+      montant: 72000, // 72,000 FCFA
+      type: "depense",
+      categorie: "Logement",
+      compte: "1",
+      statut: "effectuee",
+      datePrevue: new Date("2025-08-15"),
+      dateRealisee: new Date("2025-08-16"),
+      recurrente: false,
+    },
+  ],
+  objectifsFinanciers: [
+    {
+      id: "1",
+      nom: "Vacances été 2026",
+      type: "achat",
+      montantCible: 1800000, // 1,800,000 FCFA
+      montantActuel: 720000, // 720,000 FCFA
+      dateEcheance: new Date("2026-07-01"),
+      compte: "2",
+      statut: "en_cours",
+      contributionMensuelle: 180000, // 180,000 FCFA
+      notes: "Objectif vacances famille",
+    },
+    {
+      id: "2",
+      nom: "Fonds d'urgence",
+      type: "epargne",
+      montantCible: 6000000, // 6,000,000 FCFA
+      montantActuel: 2700000, // 2,700,000 FCFA
+      dateEcheance: new Date("2026-12-31"),
+      compte: "2",
+      statut: "en_cours",
+      contributionMensuelle: 300000, // 300,000 FCFA
+    },
+    {
+      id: "3",
+      nom: "Nouvelle voiture",
+      type: "achat",
+      montantCible: 9000000, // 9,000,000 FCFA
+      montantActuel: 9000000,
+      dateEcheance: new Date("2025-06-01"),
+      compte: "3",
+      statut: "atteint",
+      contributionMensuelle: 480000, // 480,000 FCFA
+      notes: "Objectif atteint!",
+    },
+  ],
+  categories: CATEGORIES_DEFAUT,
+  settings: {
+    theme: "light",
+    devise: "XOF", // FCFA par défaut
+    startOfWeek: 1,
+  },
+};
+
+// ==================== EXPORT FUNCTIONS ====================
+const exportFunctions = {
+  // Créer le contenu Excel
+  createExcelWorkbook: (data: AppData) => {
+    const workbook = XLSX.utils.book_new();
+    
+    // Onglet Comptes
+    const comptesData = data.comptes.map(compte => ({
+      'Nom': compte.nom,
+      'Banque': compte.banque,
+      'Type': compte.type,
+      'Solde': compte.solde,
+      'Devise': compte.devise,
+      'Actif': compte.actif ? 'Oui' : 'Non',
+      'Date de création': compte.dateCreation.toLocaleDateString('fr-FR')
+    }));
+    
+    const wsComptes = XLSX.utils.json_to_sheet(comptesData);
+    XLSX.utils.book_append_sheet(workbook, wsComptes, 'Comptes');
+    
+    // Onglet Transactions
+    const transactionsData = data.transactions.map(transaction => {
+      const compte = data.comptes.find(c => c.id === transaction.compte);
+      return {
+        'Date': transaction.date.toLocaleDateString('fr-FR'),
+        'Description': transaction.description,
+        'Montant': transaction.montant,
+        'Type': transaction.type,
+        'Catégorie': transaction.categorie,
+        'Compte': compte?.nom || 'Compte inconnu',
+        'Récurrente': transaction.recurrente ? 'Oui' : 'Non'
+      };
+    });
+    
+    const wsTransactions = XLSX.utils.json_to_sheet(transactionsData);
+    XLSX.utils.book_append_sheet(workbook, wsTransactions, 'Transactions');
+    
+    // Onglet Budget Prévisionnel
+    const budgetData = data.depensesPrevisionnelles.map(depense => {
+      const compte = data.comptes.find(c => c.id === depense.compte);
+      return {
+        'Nom': depense.nom,
+        'Montant': depense.montant,
+        'Type': depense.type,
+        'Catégorie': depense.categorie,
+        'Compte': compte?.nom || 'Compte inconnu',
+        'Statut': depense.statut,
+        'Date Prévue': depense.datePrevue.toLocaleDateString('fr-FR'),
+        'Date Réalisée': depense.dateRealisee ? depense.dateRealisee.toLocaleDateString('fr-FR') : '',
+        'Récurrente': depense.recurrente ? 'Oui' : 'Non',
+        'Notes': depense.notes || ''
+      };
+    });
+    
+    const wsBudget = XLSX.utils.json_to_sheet(budgetData);
+    XLSX.utils.book_append_sheet(workbook, wsBudget, 'Budget Prévisionnel');
+    
+    // Onglet Objectifs
+    const objectifsData = data.objectifsFinanciers.map(objectif => {
+      const compte = data.comptes.find(c => c.id === objectif.compte);
+      const progression = (objectif.montantActuel / objectif.montantCible * 100).toFixed(1);
+      return {
+        'Nom': objectif.nom,
+        'Type': objectif.type,
+        'Montant Cible': objectif.montantCible,
+        'Montant Actuel': objectif.montantActuel,
+        'Progression (%)': progression,
+        'Date Échéance': objectif.dateEcheance.toLocaleDateString('fr-FR'),
+        'Compte': compte?.nom || 'Compte inconnu',
+        'Statut': objectif.statut,
+        'Contribution Mensuelle': objectif.contributionMensuelle || 0,
+        'Notes': objectif.notes || ''
+      };
+    });
+    
+    const wsObjectifs = XLSX.utils.json_to_sheet(objectifsData);
+    XLSX.utils.book_append_sheet(workbook, wsObjectifs, 'Objectifs');
+    
+    // Onglet Résumé
+    const resumeData = [
+      { 'Métrique': 'Nombre de comptes', 'Valeur': data.comptes.length },
+      { 'Métrique': 'Comptes actifs', 'Valeur': data.comptes.filter(c => c.actif).length },
+      { 'Métrique': 'Solde total', 'Valeur': data.comptes.reduce((sum, c) => sum + (c.actif ? c.solde : 0), 0) },
+      { 'Métrique': 'Nombre de transactions', 'Valeur': data.transactions.length },
+      { 'Métrique': 'Nombre de catégories', 'Valeur': data.categories.length },
+      { 'Métrique': 'Budgets prévisionnels', 'Valeur': data.depensesPrevisionnelles.length },
+      { 'Métrique': 'Objectifs financiers', 'Valeur': data.objectifsFinanciers.length },
+      { 'Métrique': 'Devise principale', 'Valeur': data.settings.devise },
+    ];
+    
+    const wsResume = XLSX.utils.json_to_sheet(resumeData);
+    XLSX.utils.book_append_sheet(workbook, wsResume, 'Résumé');
+    
+    return workbook;
+  },
+
+  // Exporter vers Excel
+  exportToExcel: (data: AppData, filename?: string) => {
+    const workbook = exportFunctions.createExcelWorkbook(data);
+    const fileName = filename || `budget_export_${new Date().toISOString().split('T')[0]}.xlsx`;
+    XLSX.writeFile(workbook, fileName);
+  },
+
+  // Créer le contenu HTML pour le PDF
+  createPDFHTML: (data: AppData) => {
+    const soldeTotalComptes = data.comptes.filter(c => c.actif).reduce((sum, c) => sum + c.solde, 0);
+    const entreesMois = data.transactions
+      .filter(t => t.type === 'entree' && 
+        t.date.getMonth() === new Date().getMonth() && 
+        t.date.getFullYear() === new Date().getFullYear())
+      .reduce((sum, t) => sum + t.montant, 0);
+    const depensesMois = Math.abs(data.transactions
+      .filter(t => t.type === 'depense' && 
+        t.date.getMonth() === new Date().getMonth() && 
+        t.date.getFullYear() === new Date().getFullYear())
+      .reduce((sum, t) => sum + t.montant, 0));
+    
+    const formatCurrency = (amount: number, devise = "EUR"): string => {
+      return new Intl.NumberFormat('fr-FR', {
+        style: 'currency',
+        currency: devise,
+      }).format(amount);
+    };
+
+    return `
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Rapport Budget - ${new Date().toLocaleDateString('fr-FR')}</title>
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            margin: 20px; 
+            line-height: 1.6; 
+            color: #333;
+        }
+        .header { 
+            text-align: center; 
+            margin-bottom: 30px; 
+            border-bottom: 2px solid #10b981;
+            padding-bottom: 20px;
+        }
+        .header h1 { 
+            color: #10b981; 
+            margin: 0; 
+            font-size: 28px;
+        }
+        .header p { 
+            margin: 5px 0; 
+            color: #666;
+        }
+        .summary { 
+            background: #f8f9fa; 
+            padding: 20px; 
+            border-radius: 8px; 
+            margin: 20px 0;
+        }
+        .summary h2 { 
+            color: #10b981; 
+            margin-top: 0;
+            border-bottom: 1px solid #ddd;
+            padding-bottom: 10px;
+        }
+        .kpi-grid { 
+            display: grid; 
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); 
+            gap: 15px; 
+            margin: 15px 0;
+        }
+        .kpi-card { 
+            background: white; 
+            padding: 15px; 
+            border-radius: 6px; 
+            border-left: 4px solid #10b981;
+        }
+        .kpi-card h3 { 
+            margin: 0 0 5px 0; 
+            font-size: 14px; 
+            color: #666;
+        }
+        .kpi-card p { 
+            margin: 0; 
+            font-size: 20px; 
+            font-weight: bold; 
+            color: #333;
+        }
+        .section { 
+            margin: 30px 0; 
+            page-break-inside: avoid;
+        }
+        .section h2 { 
+            color: #333; 
+            border-bottom: 2px solid #10b981; 
+            padding-bottom: 8px;
+        }
+        table { 
+            width: 100%; 
+            border-collapse: collapse; 
+            margin: 15px 0;
+        }
+        th, td { 
+            border: 1px solid #ddd; 
+            padding: 8px; 
+            text-align: left;
+        }
+        th { 
+            background: #10b981; 
+            color: white;
+        }
+        tr:nth-child(even) { 
+            background: #f9f9f9;
+        }
+        .positive { 
+            color: #059669; 
+            font-weight: bold;
+        }
+        .negative { 
+            color: #dc2626; 
+            font-weight: bold;
+        }
+        .footer { 
+            margin-top: 50px; 
+            text-align: center; 
+            color: #666; 
+            border-top: 1px solid #ddd; 
+            padding-top: 20px;
+        }
+        @media print {
+            body { margin: 0; }
+            .no-print { display: none; }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Rapport Budget Simplifié</h1>
+        <p>Généré le ${new Date().toLocaleDateString('fr-FR', { 
+          weekday: 'long', 
+          year: 'numeric', 
+          month: 'long', 
+          day: 'numeric' 
+        })}</p>
+        <p>Devise principale: ${data.settings.devise}</p>
+    </div>
+
+    <div class="summary">
+        <h2>Vue d'ensemble</h2>
+        <div class="kpi-grid">
+            <div class="kpi-card">
+                <h3>Solde Total</h3>
+                <p class="${soldeTotalComptes >= 0 ? 'positive' : 'negative'}">${formatCurrency(soldeTotalComptes, data.settings.devise)}</p>
+            </div>
+            <div class="kpi-card">
+                <h3>Entrées ce mois</h3>
+                <p class="positive">${formatCurrency(entreesMois, data.settings.devise)}</p>
+            </div>
+            <div class="kpi-card">
+                <h3>Dépenses ce mois</h3>
+                <p class="negative">${formatCurrency(depensesMois, data.settings.devise)}</p>
+            </div>
+            <div class="kpi-card">
+                <h3>Épargne mensuelle</h3>
+                <p class="${(entreesMois - depensesMois) >= 0 ? 'positive' : 'negative'}">${formatCurrency(entreesMois - depensesMois, data.settings.devise)}</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Comptes Bancaires</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Nom</th>
+                    <th>Banque</th>
+                    <th>Type</th>
+                    <th>Solde</th>
+                    <th>Statut</th>
+                </tr>
+            </thead>
+            <tbody>
+                ${data.comptes.map(compte => `
+                    <tr>
+                        <td>${compte.nom}</td>
+                        <td>${compte.banque}</td>
+                        <td>${compte.type}</td>
+                        <td class="${compte.solde >= 0 ? 'positive' : 'negative'}">${formatCurrency(compte.solde, data.settings.devise)}</td>
+                        <td>${compte.actif ? 'Actif' : 'Inactif'}</td>
+                    </tr>
+                `).join('')}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="section">
+        <h2>Transactions Récentes (10 dernières)</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Date</th>
+                    <th>Description</th>
+                    <th>Catégorie</th>
+                    <th>Montant</th>
+                    <th>Compte</th>
+                </tr>
+            </thead>
+            <tbody>
+                ${data.transactions
+                  .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+                  .slice(0, 10)
+                  .map(transaction => {
+                    const compte = data.comptes.find(c => c.id === transaction.compte);
+                    return `
+                        <tr>
+                            <td>${transaction.date.toLocaleDateString('fr-FR')}</td>
+                            <td>${transaction.description}</td>
+                            <td>${transaction.categorie}</td>
+                            <td class="${transaction.montant >= 0 ? 'positive' : 'negative'}">${formatCurrency(transaction.montant, data.settings.devise)}</td>
+                            <td>${compte?.nom || 'Compte inconnu'}</td>
+                        </tr>
+                    `;
+                  }).join('')}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="section">
+        <h2>Objectifs Financiers</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Nom</th>
+                    <th>Type</th>
+                    <th>Progression</th>
+                    <th>Montant Actuel</th>
+                    <th>Montant Cible</th>
+                    <th>Statut</th>
+                </tr>
+            </thead>
+            <tbody>
+                ${data.objectifsFinanciers.map(objectif => {
+                  const progression = (objectif.montantActuel / objectif.montantCible * 100).toFixed(1);
+                  return `
+                        <tr>
+                            <td>${objectif.nom}</td>
+                            <td>${objectif.type}</td>
+                            <td>${progression}%</td>
+                            <td class="positive">${formatCurrency(objectif.montantActuel, data.settings.devise)}</td>
+                            <td>${formatCurrency(objectif.montantCible, data.settings.devise)}</td>
+                            <td>${objectif.statut}</td>
+                        </tr>
+                    `;
+                }).join('')}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="footer">
+        <p>Budget Simplifié - Application de gestion financière personnelle</p>
+        <p>Rapport généré automatiquement le ${new Date().toLocaleString('fr-FR')}</p>
+    </div>
+</body>
+</html>
+    `;
+  },
+
+  // Exporter vers PDF (via impression)
+  exportToPDF: (data: AppData) => {
+    const htmlContent = exportFunctions.createPDFHTML(data);
+    const printWindow = window.open('', '_blank');
+    if (printWindow) {
+      printWindow.document.write(htmlContent);
+      printWindow.document.close();
+      
+      // Attendre que le contenu soit chargé
+      printWindow.onload = () => {
+        setTimeout(() => {
+          printWindow.print();
+        }, 500);
+      };
+    }
+  }
+};
+
+// ==================== UTILITY FUNCTIONS ====================
+const formatCurrency = (amount: number, devise = "XOF"): string => {
+  if (isNaN(amount)) {
+    const symbols = {
+      EUR: "€",
+      USD: "$",
+      GBP: "£",
+      XOF: "FCFA",
+      MAD: "MAD",
+      TND: "TND",
+    };
+    return `0 ${symbols[devise] || devise}`;
+  }
+
+  // Configuration spéciale pour les devises africaines
+  if (devise === "XOF") {
+    // Pour le FCFA, pas de décimales et séparateur d'espace
+    const formatted = new Intl.NumberFormat("fr-FR", {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0,
+    }).format(Math.round(amount));
+    return `${formatted} FCFA`;
+  }
+
+  if (devise === "MAD") {
+    const formatted = new Intl.NumberFormat("ar-MA", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(amount);
+    return `${formatted} MAD`;
+  }
+
+  if (devise === "TND") {
+    const formatted = new Intl.NumberFormat("ar-TN", {
+      minimumFractionDigits: 3,
+      maximumFractionDigits: 3,
+    }).format(amount);
+    return `${formatted} TND`;
+  }
+
+  // Pour les autres devises, utiliser le format standard
+  const locales = {
+    EUR: "fr-FR",
+    USD: "en-US", 
+    GBP: "en-GB",
+  };
+
+  try {
+    return new Intl.NumberFormat(locales[devise] || "fr-FR", {
+      style: "currency",
+      currency: devise,
+    }).format(amount);
+  } catch (error) {
+    // Fallback si la devise n'est pas supportée
+    const symbols = {
+      EUR: "€",
+      USD: "$",
+      GBP: "£",
+      XOF: "FCFA",
+      MAD: "MAD",
+      TND: "TND",
+    };
+    const formatted = new Intl.NumberFormat("fr-FR", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(amount);
+    return `${formatted} ${symbols[devise] || devise}`;
+  }
+};
+
+const formatDate = (date: Date): string => {
+  return date.toLocaleDateString("fr-FR");
+};
+
+const formatPercent = (value: number): string => {
+  return `${value >= 0 ? "+" : ""}${value.toFixed(1)}%`;
+};
+
+const generateId = (): string => {
+  return `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+};
+
+const getMoisLabel = (mois: number): string => {
+  const moisNoms = [
+    "Jan",
+    "Fév",
+    "Mar",
+    "Avr",
+    "Mai",
+    "Jun",
+    "Jul",
+    "Aoû",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Déc",
+  ];
+  return moisNoms[mois] || "";
+};
+
+const getMoisComplet = (date: Date): string => {
+  return date.toLocaleDateString("fr-FR", { month: "long", year: "numeric" });
+};
+
+// ==================== DATA MANAGEMENT (IN-MEMORY ONLY) ====================
+const saveToMemory = (data: AppData): void => {
+  window._budgetAppData = data;
+};
+
+const loadFromMemory = (): AppData => {
+  const savedData = window._budgetAppData || DONNEES_DEMO;
+
+  // S'assurer que toutes les propriétés existent
+  return {
+    ...savedData,
+    depensesPrevisionnelles: savedData.depensesPrevisionnelles || [],
+    objectifsFinanciers: savedData.objectifsFinanciers || [],
+  };
+};
+
+// ==================== CALCULATEURS ====================
+const calculateurs = {
+  soldeTotalComptes: (comptes: CompteBancaire[]): number => {
+    return comptes.filter((c) => c.actif).reduce((sum, c) => sum + c.solde, 0);
+  },
+
+  entreesMois: (
+    transactions: Transaction[],
+    mois?: number,
+    annee?: number
+  ): number => {
+    const targetMonth = mois ?? new Date().getMonth();
+    const targetYear = annee ?? new Date().getFullYear();
+    return transactions
+      .filter(
+        (t) =>
+          t.type === "entree" &&
+          t.date.getMonth() === targetMonth &&
+          t.date.getFullYear() === targetYear
+      )
+      .reduce((sum, t) => sum + t.montant, 0);
+  },
+
+  depensesMois: (
+    transactions: Transaction[],
+    mois?: number,
+    annee?: number
+  ): number => {
+    const targetMonth = mois ?? new Date().getMonth();
+    const targetYear = annee ?? new Date().getFullYear();
+    return Math.abs(
+      transactions
+        .filter(
+          (t) =>
+            t.type === "depense" &&
+            t.date.getMonth() === targetMonth &&
+            t.date.getFullYear() === targetYear
+        )
+        .reduce((sum, t) => sum + t.montant, 0)
+    );
+  },
+
+  entreesAnnee: (transactions: Transaction[], annee?: number): number => {
+    const targetYear = annee ?? new Date().getFullYear();
+    return transactions
+      .filter((t) => t.type === "entree" && t.date.getFullYear() === targetYear)
+      .reduce((sum, t) => sum + t.montant, 0);
+  },
+
+  depensesAnnee: (transactions: Transaction[], annee?: number): number => {
+    const targetYear = annee ?? new Date().getFullYear();
+    return Math.abs(
+      transactions
+        .filter(
+          (t) => t.type === "depense" && t.date.getFullYear() === targetYear
+        )
+        .reduce((sum, t) => sum + t.montant, 0)
+    );
+  },
+
+  repartitionDepenses: (
+    transactions: Transaction[],
+    categories: Categorie[],
+    mois?: number,
+    annee?: number
+  ): any[] => {
+    const targetMonth = mois ?? new Date().getMonth();
+    const targetYear = annee ?? new Date().getFullYear();
+
+    const transactionsPeriode =
+      mois !== undefined
+        ? transactions.filter(
+            (t) =>
+              t.type === "depense" &&
+              t.date.getMonth() === targetMonth &&
+              t.date.getFullYear() === targetYear
+          )
+        : transactions.filter(
+            (t) => t.type === "depense" && t.date.getFullYear() === targetYear
+          );
+
+    return categories
+      .filter((c) => c.type === "depense")
+      .map((categorie) => {
+        const montant = Math.abs(
+          transactionsPeriode
+            .filter((t) => t.categorie === categorie.nom)
+            .reduce((sum, t) => sum + t.montant, 0)
+        );
+        return {
+          name: categorie.nom,
+          value: montant,
+          color: categorie.couleur,
+          pourcentage: 0,
+        };
+      })
+      .filter((item) => item.value > 0)
+      .sort((a, b) => b.value - a.value);
+  },
+
+  evolutionMensuelle: (
+    transactions: Transaction[],
+    derniersMois = 6
+  ): any[] => {
+    const maintenant = new Date();
+    const donnees = [];
+
+    for (let i = derniersMois - 1; i >= 0; i--) {
+      const dateMois = new Date(
+        maintenant.getFullYear(),
+        maintenant.getMonth() - i,
+        1
+      );
+      const mois = dateMois.getMonth();
+      const annee = dateMois.getFullYear();
+
+      const entrees = calculateurs.entreesMois(transactions, mois, annee);
+      const depenses = calculateurs.depensesMois(transactions, mois, annee);
+
+      donnees.push({
+        mois: getMoisLabel(mois),
+        moisComplet: getMoisComplet(dateMois),
+        entrees,
+        depenses,
+        epargne: entrees - depenses,
+      });
+    }
+
+    return donnees;
+  },
+
+  evolutionAnnuelle: (
+    transactions: Transaction[],
+    dernieresAnnees = 5
+  ): any[] => {
+    const anneeActuelle = new Date().getFullYear();
+    const donnees = [];
+
+    for (let i = dernieresAnnees - 1; i >= 0; i--) {
+      const annee = anneeActuelle - i;
+
+      const entrees = calculateurs.entreesAnnee(transactions, annee);
+      const depenses = calculateurs.depensesAnnee(transactions, annee);
+
+      donnees.push({
+        annee: annee.toString(),
+        entrees,
+        depenses,
+        epargne: entrees - depenses,
+      });
+    }
+
+    return donnees;
+  },
+
+  evolutionMensuelleAnnee: (
+    transactions: Transaction[],
+    annee: number
+  ): any[] => {
+    const donnees = [];
+
+    for (let mois = 0; mois < 12; mois++) {
+      const entrees = calculateurs.entreesMois(transactions, mois, annee);
+      const depenses = calculateurs.depensesMois(transactions, mois, annee);
+
+      donnees.push({
+        mois: getMoisLabel(mois),
+        moisComplet: new Date(annee, mois).toLocaleDateString("fr-FR", {
+          month: "long",
+          year: "numeric",
+        }),
+        entrees,
+        depenses,
+        epargne: entrees - depenses,
+      });
+    }
+
+    return donnees;
+  },
+
+  // Nouvelles fonctions pour le budget prévisionnel
+  budgetPrevisionnel: {
+    depensesEnCours: (
+      depenses: DepensePrevisionnelle[]
+    ): DepensePrevisionnelle[] => {
+      return depenses.filter((d) => d.statut === "en_cours");
+    },
+
+    depensesEffectuees: (
+      depenses: DepensePrevisionnelle[]
+    ): DepensePrevisionnelle[] => {
+      return depenses.filter((d) => d.statut === "effectuee");
+    },
+
+    totalPrevuMois: (
+      depenses: DepensePrevisionnelle[],
+      type: "entree" | "depense",
+      mois?: number,
+      annee?: number
+    ): number => {
+      const targetMonth = mois ?? new Date().getMonth();
+      const targetYear = annee ?? new Date().getFullYear();
+
+      return depenses
+        .filter(
+          (d) =>
+            d.type === type &&
+            d.datePrevue.getMonth() === targetMonth &&
+            d.datePrevue.getFullYear() === targetYear
+        )
+        .reduce((sum, d) => sum + d.montant, 0);
+    },
+
+    totalRealiseMois: (
+      depenses: DepensePrevisionnelle[],
+      type: "entree" | "depense",
+      mois?: number,
+      annee?: number
+    ): number => {
+      const targetMonth = mois ?? new Date().getMonth();
+      const targetYear = annee ?? new Date().getFullYear();
+
+      return depenses
+        .filter(
+          (d) =>
+            d.type === type &&
+            d.statut === "effectuee" &&
+            d.dateRealisee &&
+            d.dateRealisee.getMonth() === targetMonth &&
+            d.dateRealisee.getFullYear() === targetYear
+        )
+        .reduce((sum, d) => sum + d.montant, 0);
+    },
+
+    progressionObjectifs: (objectifs: ObjectifFinancier[]): any[] => {
+      return objectifs.map((obj) => ({
+        ...obj,
+        progression: (obj.montantActuel / obj.montantCible) * 100,
+        restant: obj.montantCible - obj.montantActuel,
+        joursRestants: Math.ceil(
+          (obj.dateEcheance.getTime() - new Date().getTime()) /
+            (1000 * 3600 * 24)
+        ),
+      }));
+    },
+
+    comparaisonPrevuRealise: (
+      depenses: DepensePrevisionnelle[],
+      mois?: number,
+      annee?: number
+    ) => {
+      const targetMonth = mois ?? new Date().getMonth();
+      const targetYear = annee ?? new Date().getFullYear();
+
+      const depensesPrevues = calculateurs.budgetPrevisionnel.totalPrevuMois(
+        depenses,
+        "depense",
+        targetMonth,
+        targetYear
+      );
+      const depensesRealisees =
+        calculateurs.budgetPrevisionnel.totalRealiseMois(
+          depenses,
+          "depense",
+          targetMonth,
+          targetYear
+        );
+      const entreesPrevues = calculateurs.budgetPrevisionnel.totalPrevuMois(
+        depenses,
+        "entree",
+        targetMonth,
+        targetYear
+      );
+      const entreesRealisees = calculateurs.budgetPrevisionnel.totalRealiseMois(
+        depenses,
+        "entree",
+        targetMonth,
+        targetYear
+      );
+
+      return {
+        depenses: {
+          prevu: depensesPrevues,
+          realise: depensesRealisees,
+          ecart: depensesRealisees - depensesPrevues,
+          pourcentage:
+            depensesPrevues > 0
+              ? ((depensesRealisees - depensesPrevues) / depensesPrevues) * 100
+              : 0,
+        },
+        entrees: {
+          prevu: entreesPrevues,
+          realise: entreesRealisees,
+          ecart: entreesRealisees - entreesPrevues,
+          pourcentage:
+            entreesPrevues > 0
+              ? ((entreesRealisees - entreesPrevues) / entreesPrevues) * 100
+              : 0,
+        },
+      };
+    },
+  },
+};
+
+// ==================== CURRENCY CONVERTER COMPONENT ====================
+const CurrencyConverterModal: React.FC<{
+  isOpen: boolean;
+  onClose: () => void;
+  onConfirm: (rates: ExchangeRates) => void;
+  oldCurrency: string;
+  newCurrency: string;
+  data: AppData;
+}> = ({ isOpen, onClose, onConfirm, oldCurrency, newCurrency, data }) => {
+  const [loading, setLoading] = useState(false);
+  const [rates, setRates] = useState<ExchangeRates | null>(null);
+  const [preview, setPreview] = useState<{
+    totalOld: number;
+    totalNew: number;
+    exchangeRate: number;
+  } | null>(null);
+
+  const deviseLabels = {
+    EUR: "Euro (€)",
+    USD: "Dollar US ($)",
+    GBP: "Livre Sterling (£)",
+    XOF: "Franc CFA (FCFA)",
+    MAD: "Dirham Marocain (MAD)",
+    TND: "Dinar Tunisien (TND)",
+  };
+
+  useEffect(() => {
+    if (isOpen && oldCurrency !== newCurrency) {
+      loadRates();
+    }
+  }, [isOpen, oldCurrency, newCurrency]);
+
+  const loadRates = async () => {
+    setLoading(true);
+    try {
+      const exchangeRates = await currencyService.getExchangeRates('XOF');
+      setRates(exchangeRates);
+
+      // Calculer l'aperçu
+      const totalSolde = calculateurs.soldeTotalComptes(data.comptes);
+      const convertedTotal = currencyService.convertAmount(
+        totalSolde, 
+        oldCurrency, 
+        newCurrency, 
+        exchangeRates
+      );
+      
+      const directRate = oldCurrency === 'XOF' 
+        ? exchangeRates[newCurrency] 
+        : newCurrency === 'XOF'
+        ? 1 / exchangeRates[oldCurrency]
+        : exchangeRates[newCurrency] / exchangeRates[oldCurrency];
+
+      setPreview({
+        totalOld: totalSolde,
+        totalNew: convertedTotal,
+        exchangeRate: directRate
+      });
+    } catch (error) {
+      console.error('Erreur lors du chargement des taux:', error);
+      alert('Impossible de récupérer les taux de change. Utilisation des taux par défaut.');
+      setRates(DEFAULT_RATES);
+    }
+    setLoading(false);
+  };
+
+  const handleConfirm = () => {
+    if (rates) {
+      onConfirm(rates);
+      onClose();
+    }
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} title="Conversion de devise" size="lg">
+      <div className="space-y-6">
+        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+          <h4 className="font-semibold text-blue-800 mb-2">
+            Changement de devise détecté
+          </h4>
+          <p className="text-blue-700 text-sm">
+            Vous changez de <strong>{deviseLabels[oldCurrency]}</strong> vers{" "}
+            <strong>{deviseLabels[newCurrency]}</strong>. Tous vos montants seront 
+            convertis automatiquement selon les taux de change actuels.
+          </p>
+        </div>
+
+        {loading ? (
+          <div className="text-center py-8">
+            <RefreshCw className="w-8 h-8 mx-auto animate-spin text-emerald-500 mb-3" />
+            <p className="text-gray-600">Récupération des taux de change...</p>
+          </div>
+        ) : preview && rates ? (
+          <div className="space-y-4">
+            <div className="bg-gray-50 rounded-lg p-4">
+              <h4 className="font-semibold text-gray-800 mb-3">
+                Aperçu de la conversion
+              </h4>
+              
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="text-center">
+                  <p className="text-sm text-gray-600">Solde actuel</p>
+                  <p className="text-xl font-bold text-gray-900">
+                    {formatCurrency(preview.totalOld, oldCurrency)}
+                  </p>
+                </div>
+                
+                <div className="text-center">
+                  <p className="text-sm text-gray-600">Taux de change</p>
+                  <p className="text-lg font-semibold text-emerald-600">
+                    1 {oldCurrency} = {preview.exchangeRate.toFixed(6)} {newCurrency}
+                  </p>
+                </div>
+                
+                <div className="text-center">
+                  <p className="text-sm text-gray-600">Nouveau solde</p>
+                  <p className="text-xl font-bold text-emerald-600">
+                    {formatCurrency(preview.totalNew, newCurrency)}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+              <div className="flex items-start gap-3">
+                <AlertTriangle className="w-5 h-5 text-yellow-600 mt-0.5" />
+                <div>
+                  <h4 className="font-semibold text-yellow-800">
+                    Points importants
+                  </h4>
+                  <ul className="text-yellow-700 text-sm mt-1 space-y-1">
+                    <li>• Tous les comptes, transactions et budgets seront convertis</li>
+                    <li>• Les taux sont mis à jour automatiquement toutes les heures</li>
+                    <li>• Cette action est irréversible dans cette session</li>
+                    <li>• Les calculs utilisent les taux de change du marché</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+
+            <div className="text-xs text-gray-500">
+              <p>Dernière mise à jour des taux : {new Date().toLocaleString('fr-FR')}</p>
+              <p>Source : APIs de change internationales avec fallback</p>
+            </div>
+          </div>
+        ) : (
+          <div className="text-center py-8">
+            <AlertTriangle className="w-12 h-12 mx-auto text-red-500 mb-3" />
+            <p className="text-red-600">Erreur lors du chargement des taux de change</p>
+          </div>
+        )}
+
+        <div className="flex justify-end gap-3">
+          <Button variant="secondary" onClick={onClose} disabled={loading}>
+            Annuler
+          </Button>
+          <Button 
+            onClick={handleConfirm} 
+            disabled={loading || !rates}
+          >
+            {loading ? (
+              <>
+                <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                Chargement...
+              </>
+            ) : (
+              <>
+                <CheckCircle className="w-4 h-4 mr-2" />
+                Confirmer la conversion
+              </>
+            )}
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  );
+};
+const Card: React.FC<{ children: React.ReactNode; className?: string }> = ({
+  children,
+  className = "",
+}) => (
+  <div className={`bg-white rounded-lg shadow-sm border p-6 ${className}`}>
+    {children}
+  </div>
+);
+
+const Button: React.FC<{
+  children: React.ReactNode;
+  onClick?: () => void;
+  variant?: "primary" | "secondary" | "ghost" | "danger";
+  size?: "sm" | "md" | "lg";
+  className?: string;
+}> = ({
+  children,
+  onClick,
+  variant = "primary",
+  size = "md",
+  className = "",
+}) => {
+  const baseClasses =
+    "inline-flex items-center justify-center rounded-md font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2";
+  const variants = {
+    primary:
+      "bg-emerald-500 text-white hover:bg-emerald-600 focus:ring-emerald-500",
+    secondary:
+      "bg-gray-200 text-gray-900 hover:bg-gray-300 focus:ring-gray-500",
+    ghost:
+      "text-gray-600 hover:text-gray-900 hover:bg-gray-100 focus:ring-gray-500",
+    danger: "bg-red-500 text-white hover:bg-red-600 focus:ring-red-500",
+  };
+  const sizes = {
+    sm: "px-3 py-1.5 text-sm",
+    md: "px-4 py-2",
+    lg: "px-6 py-3 text-lg",
+  };
+
+  return (
+    <button
+      className={`${baseClasses} ${variants[variant]} ${sizes[size]} ${className}`}
+      onClick={onClick}
+    >
+      {children}
+    </button>
+  );
+};
+
+const KPICard: React.FC<{
+  title: string;
+  value: string;
+  icon: React.ReactNode;
+  color: string;
+  subtitle?: string;
+  trend?: { value: number; label: string };
+}> = ({ title, value, icon, color, subtitle, trend }) => (
+  <Card>
+    <div className="flex items-center justify-between">
+      <div className="flex-1">
+        <p className="text-sm text-gray-600 mb-1">{title}</p>
+        <p className={`text-2xl font-bold mb-1 ${color}`}>{value}</p>
+        {subtitle && <p className="text-xs text-gray-500">{subtitle}</p>}
+        {trend && (
+          <div className="flex items-center mt-2">
+            {trend.value >= 0 ? (
+              <ArrowUp className="w-3 h-3 text-green-500 mr-1" />
+            ) : (
+              <ArrowDown className="w-3 h-3 text-red-500 mr-1" />
+            )}
+            <span
+              className={`text-xs ${
+                trend.value >= 0 ? "text-green-600" : "text-red-600"
+              }`}
+            >
+              {formatPercent(trend.value)} {trend.label}
+            </span>
+          </div>
+        )}
+      </div>
+      <div className="p-3 bg-gray-100 rounded-full">{icon}</div>
+    </div>
+  </Card>
+);
+
+const Modal: React.FC<{
+  isOpen: boolean;
+  onClose: () => void;
+  title: string;
+  children: React.ReactNode;
+  size?: "sm" | "md" | "lg" | "xl";
+}> = ({ isOpen, onClose, title, children, size = "md" }) => {
+  if (!isOpen) return null;
+
+  const sizes = {
+    sm: "max-w-md",
+    md: "max-w-lg",
+    lg: "max-w-2xl",
+    xl: "max-w-4xl",
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+      <div
+        className={`bg-white rounded-lg shadow-xl w-full ${sizes[size]} max-h-[90vh] overflow-auto`}
+      >
+        <div className="flex items-center justify-between p-6 border-b">
+          <h3 className="text-lg font-semibold">{title}</h3>
+          <button
+            onClick={onClose}
+            className="text-gray-400 hover:text-gray-600"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+        <div className="p-6">{children}</div>
+      </div>
+    </div>
+  );
+};
+
+// ==================== EXPORT MODAL COMPONENT ====================
+const ExportModal: React.FC<{
+  isOpen: boolean;
+  onClose: () => void;
+  data: AppData;
+}> = ({ isOpen, onClose, data }) => {
+  const [exportFormat, setExportFormat] = useState('excel');
+  const [exportType, setExportType] = useState('complet');
+  const [loading, setLoading] = useState(false);
+
+  const handleExport = async () => {
+    setLoading(true);
+    
+    try {
+      if (exportFormat === 'excel') {
+        exportFunctions.exportToExcel(data);
+      } else if (exportFormat === 'pdf') {
+        exportFunctions.exportToPDF(data);
+      }
+      
+      setTimeout(() => {
+        setLoading(false);
+        onClose();
+      }, 1000);
+    } catch (error) {
+      console.error('Erreur lors de l\'export:', error);
+      setLoading(false);
+      alert('Une erreur s\'est produite lors de l\'export. Veuillez réessayer.');
+    }
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} title="Exporter les données" size="md">
+      <div className="space-y-6">
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-3">
+            Format d'export
+          </label>
+          <div className="space-y-3">
+            <label className="flex items-center">
+              <input
+                type="radio"
+                value="excel"
+                checked={exportFormat === 'excel'}
+                onChange={(e) => setExportFormat(e.target.value)}
+                className="mr-3"
+              />
+              <div className="flex items-center">
+                <FileText className="w-5 h-5 text-green-600 mr-2" />
+                <span>Excel (.xlsx)</span>
+              </div>
+              <span className="ml-2 text-sm text-gray-500">
+                - Données structurées en onglets
+              </span>
+            </label>
+            
+            <label className="flex items-center">
+              <input
+                type="radio"
+                value="pdf"
+                checked={exportFormat === 'pdf'}
+                onChange={(e) => setExportFormat(e.target.value)}
+                className="mr-3"
+              />
+              <div className="flex items-center">
+                <Download className="w-5 h-5 text-red-600 mr-2" />
+                <span>PDF</span>
+              </div>
+              <span className="ml-2 text-sm text-gray-500">
+                - Rapport formaté pour impression
+              </span>
+            </label>
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-3">
+            Type d'export
+          </label>
+          <div className="space-y-2">
+            <label className="flex items-center">
+              <input
+                type="radio"
+                value="complet"
+                checked={exportType === 'complet'}
+                onChange={(e) => setExportType(e.target.value)}
+                className="mr-3"
+              />
+              <span>Export complet</span>
+              <span className="ml-2 text-sm text-gray-500">
+                - Toutes les données (comptes, transactions, budget, objectifs)
+              </span>
+            </label>
+          </div>
+        </div>
+
+        <div className="bg-blue-50 p-4 rounded-lg">
+          <h4 className="font-medium text-blue-800 mb-2">Contenu de l'export :</h4>
+          <ul className="text-sm text-blue-700 space-y-1">
+            <li>• {data.comptes.length} compte{data.comptes.length > 1 ? 's' : ''} bancaire{data.comptes.length > 1 ? 's' : ''}</li>
+            <li>• {data.transactions.length} transaction{data.transactions.length > 1 ? 's' : ''}</li>
+            <li>• {data.depensesPrevisionnelles.length} budget{data.depensesPrevisionnelles.length > 1 ? 's' : ''} prévisionnel{data.depensesPrevisionnelles.length > 1 ? 's' : ''}</li>
+            <li>• {data.objectifsFinanciers.length} objectif{data.objectifsFinanciers.length > 1 ? 's' : ''} financier{data.objectifsFinanciers.length > 1 ? 's' : ''}</li>
+            <li>• Résumé et statistiques</li>
+          </ul>
+        </div>
+
+        <div className="flex justify-end gap-3">
+          <Button variant="secondary" onClick={onClose} disabled={loading}>
+            Annuler
+          </Button>
+          <Button onClick={handleExport} disabled={loading}>
+            {loading ? (
+              <>
+                <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                Export en cours...
+              </>
+            ) : (
+              <>
+                <Download className="w-4 h-4 mr-2" />
+                Exporter
+              </>
+            )}
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  );
+};
+
+// ==================== COMPTES COMPONENT ====================
+const ComptesPage: React.FC<{
+  data: AppData;
+  onUpdateData: (data: AppData) => void;
+}> = ({ data, onUpdateData }) => {
+  const [showModal, setShowModal] = useState(false);
+  const [editingCompte, setEditingCompte] = useState<CompteBancaire | null>(
+    null
+  );
+
+  const [formData, setFormData] = useState({
+    nom: "",
+    banque: "",
+    type: "courant" as CompteBancaire["type"],
+    solde: 0,
+    couleur: COULEURS_THEME[0],
+  });
+
+  const resetForm = () => {
+    setFormData({
+      nom: "",
+      banque: "",
+      type: "courant",
+      solde: 0,
+      couleur: COULEURS_THEME[0],
+    });
+    setEditingCompte(null);
+  };
+
+  const handleSubmit = () => {
+    if (!formData.nom || !formData.banque) return;
+
+    const newCompte: CompteBancaire = {
+      id: editingCompte?.id || generateId(),
+      nom: formData.nom,
+      banque: formData.banque,
+      type: formData.type,
+      solde: formData.solde,
+      devise: data.settings.devise,
+      couleur: formData.couleur,
+      actif: true,
+      dateCreation: editingCompte?.dateCreation || new Date(),
+    };
+
+    let newData: AppData;
+
+    if (editingCompte) {
+      newData = {
+        ...data,
+        comptes: data.comptes.map((c) =>
+          c.id === editingCompte.id ? newCompte : c
+        ),
+      };
+    } else {
+      newData = {
+        ...data,
+        comptes: [...data.comptes, newCompte],
+      };
+    }
+
+    onUpdateData(newData);
+    setShowModal(false);
+    resetForm();
+  };
+
+  const handleEdit = (compte: CompteBancaire) => {
+    setEditingCompte(compte);
+    setFormData({
+      nom: compte.nom,
+      banque: compte.banque,
+      type: compte.type,
+      solde: compte.solde,
+      couleur: compte.couleur,
+    });
+    setShowModal(true);
+  };
+
+  const handleDelete = (compteId: string) => {
+    if (confirm("Êtes-vous sûr de vouloir supprimer ce compte ?")) {
+      const newData = {
+        ...data,
+        comptes: data.comptes.filter((c) => c.id !== compteId),
+      };
+      onUpdateData(newData);
+    }
+  };
+
+  const toggleCompte = (compteId: string) => {
+    const newData = {
+      ...data,
+      comptes: data.comptes.map((c) =>
+        c.id === compteId ? { ...c, actif: !c.actif } : c
+      ),
+    };
+    onUpdateData(newData);
+  };
+
+  const getTypeLabel = (type: CompteBancaire["type"]) => {
+    const labels = {
+      courant: "Compte Courant",
+      epargne: "Épargne",
+      livret: "Livret",
+      cash: "Espèces",
+    };
+    return labels[type];
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <div>
+          <h1 className="text-3xl font-bold text-gray-900">Mes Comptes</h1>
+          <p className="text-gray-600">
+            Gérez vos comptes bancaires et suivez vos soldes
+          </p>
+        </div>
+        <Button onClick={() => setShowModal(true)}>
+          <Plus className="w-4 h-4 mr-2" />
+          Ajouter un compte
+        </Button>
+      </div>
+
+      {/* Résumé rapide */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <KPICard
+          title="Solde Total"
+          value={formatCurrency(
+            calculateurs.soldeTotalComptes(data.comptes),
+            data.settings.devise
+          )}
+          icon={<Wallet className="w-6 h-6 text-emerald-600" />}
+          color="text-emerald-600"
+        />
+        <KPICard
+          title="Comptes Actifs"
+          value={data.comptes.filter((c) => c.actif).length.toString()}
+          icon={<CreditCard className="w-6 h-6 text-blue-600" />}
+          color="text-blue-600"
+        />
+        <KPICard
+          title="Banques"
+          value={[
+            ...new Set(data.comptes.map((c) => c.banque)),
+          ].length.toString()}
+          icon={<Building2 className="w-6 h-6 text-purple-600" />}
+          color="text-purple-600"
+        />
+      </div>
+
+      {/* Liste des comptes */}
+      <Card>
+        <h3 className="text-lg font-semibold mb-4">Tous les comptes</h3>
+        {data.comptes.length > 0 ? (
+          <div className="space-y-4">
+            {data.comptes.map((compte) => (
+              <div
+                key={compte.id}
+                className="flex items-center justify-between p-4 border rounded-lg hover:bg-gray-50"
+              >
+                <div className="flex items-center gap-4">
+                  <div
+                    className="w-4 h-4 rounded-full"
+                    style={{ backgroundColor: compte.couleur }}
+                  />
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2">
+                      <h4 className="font-semibold text-gray-900">
+                        {compte.nom}
+                      </h4>
+                      {!compte.actif && (
+                        <span className="px-2 py-1 bg-gray-200 text-gray-600 text-xs rounded">
+                          Inactif
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-sm text-gray-600">
+                      {compte.banque} • {getTypeLabel(compte.type)}
+                    </p>
+                    <p className="text-xs text-gray-500">
+                      Créé le {formatDate(compte.dateCreation)}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-4">
+                  <div className="text-right">
+                    <p
+                      className={`text-lg font-semibold ${
+                        compte.solde >= 0 ? "text-green-600" : "text-red-600"
+                      }`}
+                    >
+                      {formatCurrency(compte.solde, data.settings.devise)}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => toggleCompte(compte.id)}
+                      className={`p-2 rounded-md transition-colors ${
+                        compte.actif
+                          ? "text-green-600 hover:bg-green-100"
+                          : "text-gray-400 hover:bg-gray-100"
+                      }`}
+                      title={compte.actif ? "Désactiver" : "Activer"}
+                    >
+                      <Eye className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={() => handleEdit(compte)}
+                      className="p-2 text-blue-600 hover:bg-blue-100 rounded-md transition-colors"
+                      title="Modifier"
+                    >
+                      <Edit className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={() => handleDelete(compte.id)}
+                      className="p-2 text-red-600 hover:bg-red-100 rounded-md transition-colors"
+                      title="Supprimer"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="text-center py-8 text-gray-500">
+            <Building2 className="w-16 h-16 mx-auto mb-4 opacity-50" />
+            <p className="text-lg">Aucun compte ajouté</p>
+            <p className="text-sm">
+              Commencez par ajouter votre premier compte
+            </p>
+          </div>
+        )}
+      </Card>
+
+      {/* Modal d'ajout/modification */}
+      <Modal
+        isOpen={showModal}
+        onClose={() => {
+          setShowModal(false);
+          resetForm();
+        }}
+        title={editingCompte ? "Modifier le compte" : "Ajouter un compte"}
+      >
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Nom du compte
+            </label>
+            <input
+              type="text"
+              value={formData.nom}
+              onChange={(e) =>
+                setFormData({ ...formData, nom: e.target.value })
+              }
+              className="w-full border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-emerald-500"
+              placeholder="Ex: Compte Courant Principal"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Banque
+            </label>
+            <input
+              type="text"
+              value={formData.banque}
+              onChange={(e) =>
+                setFormData({ ...formData, banque: e.target.value })
+              }
+              className="w-full border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-emerald-500"
+              placeholder="Ex: BNP Paribas"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Type de compte
+            </label>
+            <select
+              value={formData.type}
+              onChange={(e) =>
+                setFormData({
+                  ...formData,
+                  type: e.target.value as CompteBancaire["type"],
+                })
+              }
+              className="w-full border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-emerald-500"
+            >
+              <option value="courant">Compte Courant</option>
+              <option value="epargne">Épargne</option>
+              <option value="livret">Livret</option>
+              <option value="cash">Espèces</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Solde initial
+            </label>
+            <input
+              type="number"
+              step="0.01"
+              value={formData.solde}
+              onChange={(e) =>
+                setFormData({
+                  ...formData,
+                  solde: parseFloat(e.target.value) || 0,
+                })
+              }
+              className="w-full border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-emerald-500"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Couleur
+            </label>
+            <div className="flex flex-wrap gap-2">
+              {COULEURS_THEME.map((couleur) => (
+                <button
+                  key={couleur}
+                  type="button"
+                  onClick={() => setFormData({ ...formData, couleur })}
+                  className={`w-8 h-8 rounded-full border-2 ${
+                    formData.couleur === couleur
+                      ? "border-gray-800"
+                      : "border-gray-300"
+                  }`}
+                  style={{ backgroundColor: couleur }}
+                />
+              ))}
+            </div>
+          </div>
+
+          <div className="flex justify-end gap-3">
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setShowModal(false);
+                resetForm();
+              }}
+            >
+              Annuler
+            </Button>
+            <Button onClick={handleSubmit}>
+              {editingCompte ? "Modifier" : "Ajouter"}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+    </div>
+  );
+};
+
+// ==================== DASHBOARD COMPONENT ====================
+const Dashboard: React.FC<{
+  data: AppData;
+  onUpdateData: (data: AppData) => void;
+}> = ({ data, onUpdateData }) => {
+  const [activeTab, setActiveTab] = useState("mensuel");
+  const [moisSelectionne, setMoisSelectionne] = useState(new Date().getMonth());
+  const [anneeSelectionnee, setAnneeSelectionnee] = useState(
+    new Date().getFullYear()
+  );
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [showCurrencyModal, setShowCurrencyModal] = useState(false);
+  const [pendingCurrency, setPendingCurrency] = useState<string>("");
+
+  const deviseOptions = [
+    { value: "XOF", label: "Franc CFA (FCFA)", symbol: "FCFA" },
+    { value: "EUR", label: "Euro (€)", symbol: "€" },
+    { value: "USD", label: "Dollar US ($)", symbol: "$" },
+    { value: "GBP", label: "Livre Sterling (£)", symbol: "£" },
+    { value: "MAD", label: "Dirham Marocain (MAD)", symbol: "MAD" },
+    { value: "TND", label: "Dinar Tunisien (TND)", symbol: "TND" },
+  ];
+
+  const handleDeviseChange = (nouvelleDevise: string) => {
+    if (nouvelleDevise === data.settings.devise) return;
+    
+    // Afficher le modal de conversion
+    setPendingCurrency(nouvelleDevise);
+    setShowCurrencyModal(true);
+  };
+
+  const handleCurrencyConversion = (rates: ExchangeRates) => {
+    const convertedData = currencyService.convertAppData(
+      data,
+      data.settings.devise,
+      pendingCurrency,
+      rates
+    );
+    
+    onUpdateData(convertedData);
+    setPendingCurrency("");
+  };
+
+  const handleExport = () => {
+    setShowExportModal(true);
+  };
+
+  const handleActualiser = async () => {
+    // Actualiser les taux de change et forcer un recalcul des données
+    try {
+      await currencyService.getExchangeRates('XOF');
+      onUpdateData({ ...data });
+    } catch (error) {
+      console.warn('Impossible d\'actualiser les taux de change');
+      onUpdateData({ ...data });
+    }
+  };
+
+  // Données selon la période active
+  const metriques = useMemo(() => {
+    const soldeTotalComptes = calculateurs.soldeTotalComptes(data.comptes);
+
+    let entreesPeriode, depensesPeriode, epargneRealisee;
+
+    if (activeTab === "mensuel") {
+      entreesPeriode = calculateurs.entreesMois(
+        data.transactions,
+        moisSelectionne,
+        anneeSelectionnee
+      );
+      depensesPeriode = calculateurs.depensesMois(
+        data.transactions,
+        moisSelectionne,
+        anneeSelectionnee
+      );
+      epargneRealisee = entreesPeriode - depensesPeriode;
+    } else {
+      entreesPeriode = calculateurs.entreesAnnee(
+        data.transactions,
+        anneeSelectionnee
+      );
+      depensesPeriode = calculateurs.depensesAnnee(
+        data.transactions,
+        anneeSelectionnee
+      );
+      epargneRealisee = entreesPeriode - depensesPeriode;
+    }
+
+    return {
+      soldeTotalComptes,
+      entreesPeriode,
+      depensesPeriode,
+      epargneRealisee,
+    };
+  }, [
+    data.comptes,
+    data.transactions,
+    activeTab,
+    moisSelectionne,
+    anneeSelectionnee,
+  ]);
+
+  const transactionsRecentes = useMemo(
+    () =>
+      data.transactions
+        .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+        .slice(0, 5),
+    [data.transactions]
+  );
+
+  const repartitionDepenses = useMemo(() => {
+    if (activeTab === "mensuel") {
+      return calculateurs.repartitionDepenses(
+        data.transactions,
+        data.categories,
+        moisSelectionne,
+        anneeSelectionnee
+      );
+    } else {
+      return calculateurs.repartitionDepenses(
+        data.transactions,
+        data.categories,
+        undefined,
+        anneeSelectionnee
+      );
+    }
+  }, [
+    data.transactions,
+    data.categories,
+    activeTab,
+    moisSelectionne,
+    anneeSelectionnee,
+  ]);
+
+  const evolutionData = useMemo(() => {
+    if (activeTab === "mensuel") {
+      return calculateurs.evolutionMensuelleAnnee(
+        data.transactions,
+        anneeSelectionnee
+      );
+    } else {
+      return calculateurs.evolutionAnnuelle(data.transactions, 5);
+    }
+  }, [data.transactions, activeTab, anneeSelectionnee]);
+
+  // Générer les options d'années (5 dernières années à partir de l'année en cours)
+  const anneesDisponibles = useMemo(() => {
+    const anneeActuelle = new Date().getFullYear();
+    const annees = [];
+    for (let i = 0; i < 5; i++) {
+      annees.push(anneeActuelle - i);
+    }
+    return annees;
+  }, []);
+
+  const moisNoms = [
+    "Janvier",
+    "Février",
+    "Mars",
+    "Avril",
+    "Mai",
+    "Juin",
+    "Juillet",
+    "Août",
+    "Septembre",
+    "Octobre",
+    "Novembre",
+    "Décembre",
+  ];
+
+  const getPeriodeLabel = () => {
+    if (activeTab === "mensuel") {
+      return `${moisNoms[moisSelectionne]} ${anneeSelectionnee}`;
+    } else {
+      return `Année ${anneeSelectionnee}`;
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col lg:flex-row lg:justify-between lg:items-center gap-4">
+        <div>
+          <h1 className="text-3xl font-bold text-gray-900">Dashboard</h1>
+          <p className="text-gray-600">
+            {new Date().toLocaleDateString("fr-FR", {
+              weekday: "long",
+              year: "numeric",
+              month: "long",
+              day: "numeric",
+            })}
+          </p>
+        </div>
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            <label className="text-sm font-medium text-gray-700">
+              Devise :
+            </label>
+            <select
+              value={data.settings.devise}
+              onChange={(e) => handleDeviseChange(e.target.value)}
+              className="border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-emerald-500 bg-white"
+            >
+              {deviseOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex gap-2">
+            <Button variant="ghost" size="sm" onClick={handleExport}>
+              <Download className="w-4 h-4 mr-2" />
+              Export
+            </Button>
+            <Button variant="ghost" size="sm" onClick={handleActualiser}>
+              <RefreshCw className="w-4 h-4 mr-2" />
+              Actualiser
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      {/* Onglets de période */}
+      <Card>
+        <div className="flex flex-col space-y-4">
+          {/* Navigation des onglets */}
+          <div className="border-b border-gray-200">
+            <nav className="-mb-px flex space-x-8">
+              {[
+                { id: "mensuel", name: "Vue Mensuelle", icon: Calendar },
+                { id: "annuel", name: "Vue Annuelle", icon: BarChart },
+              ].map((tab) => {
+                const IconComponent = tab.icon;
+                return (
+                  <button
+                    key={tab.id}
+                    onClick={() => setActiveTab(tab.id)}
+                    className={`flex items-center gap-2 py-2 px-1 border-b-2 font-medium text-sm ${
+                      activeTab === tab.id
+                        ? "border-emerald-500 text-emerald-600"
+                        : "border-transparent text-gray-500 hover:text-gray-700"
+                    }`}
+                  >
+                    <IconComponent className="w-4 h-4" />
+                    {tab.name}
+                  </button>
+                );
+              })}
+            </nav>
+          </div>
+
+          {/* Sélecteurs de période */}
+          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
+            <div className="flex items-center gap-2">
+              <label className="text-sm font-medium text-gray-700">
+                Période :
+              </label>
+              <span className="text-lg font-semibold text-emerald-600">
+                {getPeriodeLabel()}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2">
+              {activeTab === "mensuel" && (
+                <select
+                  value={moisSelectionne}
+                  onChange={(e) => setMoisSelectionne(parseInt(e.target.value))}
+                  className="border border-gray-300 rounded-md px-3 py-1 text-sm focus:ring-2 focus:ring-emerald-500"
+                >
+                  {moisNoms.map((mois, index) => (
+                    <option key={index} value={index}>
+                      {mois}
+                    </option>
+                  ))}
+                </select>
+              )}
+
+              <select
+                value={anneeSelectionnee}
+                onChange={(e) => setAnneeSelectionnee(parseInt(e.target.value))}
+                className="border border-gray-300 rounded-md px-3 py-1 text-sm focus:ring-2 focus:ring-emerald-500"
+              >
+                {anneesDisponibles.map((annee) => (
+                  <option key={annee} value={annee}>
+                    {annee}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => {
+                const aujourd = new Date();
+                setMoisSelectionne(aujourd.getMonth());
+                setAnneeSelectionnee(aujourd.getFullYear());
+              }}
+            >
+              Aujourd'hui
+            </Button>
+          </div>
+        </div>
+      </Card>
+
+      {/* KPIs adaptés à la période */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+        <KPICard
+          title="Solde Total"
+          value={formatCurrency(
+            metriques.soldeTotalComptes,
+            data.settings.devise
+          )}
+          icon={<DollarSign className="w-6 h-6 text-emerald-600" />}
+          color="text-gray-900"
+          subtitle={`${
+            data.comptes.filter((c) => c.actif).length
+          } comptes actifs`}
+        />
+        <KPICard
+          title={
+            activeTab === "mensuel" ? "Entrées du mois" : "Entrées de l'année"
+          }
+          value={formatCurrency(metriques.entreesPeriode, data.settings.devise)}
+          icon={<ArrowUp className="w-6 h-6 text-green-600" />}
+          color="text-green-600"
+        />
+        <KPICard
+          title={
+            activeTab === "mensuel" ? "Dépenses du mois" : "Dépenses de l'année"
+          }
+          value={formatCurrency(
+            metriques.depensesPeriode,
+            data.settings.devise
+          )}
+          icon={<ArrowDown className="w-6 h-6 text-red-600" />}
+          color="text-red-600"
+        />
+        <KPICard
+          title={
+            activeTab === "mensuel" ? "Épargne mensuelle" : "Épargne annuelle"
+          }
+          value={formatCurrency(
+            metriques.epargneRealisee,
+            data.settings.devise
+          )}
+          icon={<Target className="w-6 h-6 text-blue-600" />}
+          color={
+            metriques.epargneRealisee >= 0 ? "text-emerald-600" : "text-red-600"
+          }
+          subtitle={`Taux: ${
+            metriques.entreesPeriode > 0
+              ? (
+                  (metriques.epargneRealisee / metriques.entreesPeriode) *
+                  100
+                ).toFixed(1)
+              : 0
+          }%`}
+        />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Répartition des dépenses pour la période */}
+        <Card>
+          <h3 className="text-lg font-semibold mb-4">
+            Répartition des Dépenses - {getPeriodeLabel()}
+          </h3>
+          {repartitionDepenses.length > 0 ? (
+            <ResponsiveContainer width="100%" height={250}>
+              <RechartsPieChart>
+                <Pie
+                  dataKey="value"
+                  data={repartitionDepenses}
+                  cx="50%"
+                  cy="50%"
+                  labelLine={false}
+                  label={({ name, percent }) =>
+                    `${name} ${(percent * 100).toFixed(0)}%`
+                  }
+                  outerRadius={80}
+                >
+                  {repartitionDepenses.map((entry, index) => (
+                    <Cell key={`cell-${index}`} fill={entry.color} />
+                  ))}
+                </Pie>
+                <Tooltip
+                  formatter={(value) =>
+                    formatCurrency(Number(value), data.settings.devise)
+                  }
+                />
+              </RechartsPieChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="flex items-center justify-center h-64 text-gray-500">
+              <div className="text-center">
+                <PieChart className="w-12 h-12 mx-auto mb-2 opacity-50" />
+                <p>Aucune dépense pour cette période</p>
+              </div>
+            </div>
+          )}
+        </Card>
+
+        {/* Transactions récentes */}
+        <Card>
+          <h3 className="text-lg font-semibold mb-4">Transactions Récentes</h3>
+          <div className="space-y-3">
+            {transactionsRecentes.length > 0 ? (
+              transactionsRecentes.map((transaction) => {
+                const compte = data.comptes.find(
+                  (c) => c.id === transaction.compte
+                );
+                const categorie = data.categories.find(
+                  (c) => c.nom === transaction.categorie
+                );
+
+                return (
+                  <div
+                    key={transaction.id}
+                    className="flex items-center justify-between p-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors"
+                  >
+                    <div className="flex items-center gap-3 flex-1">
+                      <div
+                        className="w-3 h-3 rounded-full"
+                        style={{
+                          backgroundColor: categorie?.couleur || "#gray",
+                        }}
+                      />
+                      <div className="flex-1">
+                        <p className="font-medium text-gray-900 text-sm">
+                          {transaction.description}
+                        </p>
+                        <p className="text-xs text-gray-500">
+                          {formatDate(transaction.date)} •{" "}
+                          {transaction.categorie} •{" "}
+                          {compte?.nom || "Compte inconnu"}
+                        </p>
+                      </div>
+                    </div>
+                    <div
+                      className={`font-semibold text-sm ${
+                        transaction.montant >= 0
+                          ? "text-green-600"
+                          : "text-red-600"
+                      }`}
+                    >
+                      {transaction.montant >= 0 ? "+" : ""}
+                      {formatCurrency(
+                        transaction.montant,
+                        data.settings.devise
+                      )}
+                    </div>
+                  </div>
+                );
+              })
+            ) : (
+              <div className="flex items-center justify-center h-32 text-gray-500">
+                <div className="text-center">
+                  <Receipt className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                  <p>Aucune transaction</p>
+                </div>
+              </div>
+            )}
+          </div>
+        </Card>
+      </div>
+
+      {/* Graphique d'évolution adapté */}
+      {evolutionData.length > 0 && (
+        <Card>
+          <h3 className="text-lg font-semibold mb-4">
+            {activeTab === "mensuel"
+              ? `Évolution mensuelle ${anneeSelectionnee}`
+              : "Évolution sur 5 ans"}
+          </h3>
+          <ResponsiveContainer width="100%" height={300}>
+            <RechartsLineChart data={evolutionData}>
+              <CartesianGrid strokeDasharray="3 3" className="opacity-30" />
+              <XAxis dataKey={activeTab === "mensuel" ? "mois" : "annee"} />
+              <YAxis />
+              <Tooltip
+                formatter={(value, name) => [
+                  formatCurrency(Number(value), data.settings.devise),
+                  name,
+                ]}
+                labelFormatter={(label) =>
+                  activeTab === "mensuel" ? `Mois: ${label}` : `Année: ${label}`
+                }
+              />
+              <Legend />
+              <Line
+                type="monotone"
+                dataKey="entrees"
+                stroke="#10b981"
+                strokeWidth={2}
+                name="Entrées"
+                dot={{ fill: "#10b981", strokeWidth: 2, r: 4 }}
+              />
+              <Line
+                type="monotone"
+                dataKey="depenses"
+                stroke="#ef4444"
+                strokeWidth={2}
+                name="Dépenses"
+                dot={{ fill: "#ef4444", strokeWidth: 2, r: 4 }}
+              />
+              <Line
+                type="monotone"
+                dataKey="epargne"
+                stroke="#6366f1"
+                strokeWidth={2}
+                name="Épargne"
+                dot={{ fill: "#6366f1", strokeWidth: 2, r: 4 }}
+              />
+            </RechartsLineChart>
+          </ResponsiveContainer>
+        </Card>
+      )}
+
+      {/* Résumé et alertes */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <Card>
+          <h3 className="text-lg font-semibold mb-4">Résumé Statistiques</h3>
+          <div className="space-y-4">
+            <div className="flex justify-between items-center">
+              <span className="text-gray-600">Total comptes</span>
+              <span className="font-medium">{data.comptes.length}</span>
+            </div>
+            <div className="flex justify-between items-center">
+              <span className="text-gray-600">Transactions totales</span>
+              <span className="font-medium">{data.transactions.length}</span>
+            </div>
+            <div className="flex justify-between items-center">
+              <span className="text-gray-600">Catégories</span>
+              <span className="font-medium">{data.categories.length}</span>
+            </div>
+            <div className="flex justify-between items-center">
+              <span className="text-gray-600">Banques utilisées</span>
+              <span className="font-medium">
+                {[...new Set(data.comptes.map((c) => c.banque))].length}
+              </span>
+            </div>
+          </div>
+        </Card>
+
+        {/* Système d'alerte pour budget dépassé */}
+        {metriques.epargneRealisee < 0 ? (
+          <Card className="border-red-200 bg-red-50">
+            <div className="flex items-center gap-3">
+              <AlertTriangle className="w-5 h-5 text-red-600 flex-shrink-0" />
+              <div className="flex-1">
+                <h4 className="font-semibold text-red-800">
+                  Attention - Budget dépassé
+                </h4>
+                <p className="text-red-700">
+                  Les dépenses de cette période dépassent les entrées de{" "}
+                  {formatCurrency(
+                    Math.abs(metriques.epargneRealisee),
+                    data.settings.devise
+                  )}
+                </p>
+                <p className="text-red-600 text-sm mt-1">
+                  Période concernée : {getPeriodeLabel()}
+                </p>
+              </div>
+            </div>
+          </Card>
+        ) : (
+          <Card className="border-green-200 bg-green-50">
+            <div className="flex items-center gap-3">
+              <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0" />
+              <div className="flex-1">
+                <h4 className="font-semibold text-green-800">
+                  Budget équilibré
+                </h4>
+                <p className="text-green-700">
+                  Épargne réalisée :{" "}
+                  {formatCurrency(
+                    metriques.epargneRealisee,
+                    data.settings.devise
+                  )}
+                </p>
+                <p className="text-green-600 text-sm mt-1">
+                  Taux d'épargne :{" "}
+                  {metriques.entreesPeriode > 0
+                    ? (
+                        (metriques.epargneRealisee / metriques.entreesPeriode) *
+                        100
+                      ).toFixed(1)
+                    : 0}
+                  %
+                </p>
+              </div>
+            </div>
+          </Card>
+        )}
+      </div>
+
+      {/* Modal d'export */}
+      <ExportModal
+        isOpen={showExportModal}
+        onClose={() => setShowExportModal(false)}
+        data={data}
+      />
+
+      {/* Modal de conversion de devise */}
+      <CurrencyConverterModal
+        isOpen={showCurrencyModal}
+        onClose={() => {
+          setShowCurrencyModal(false);
+          setPendingCurrency("");
+        }}
+        onConfirm={handleCurrencyConversion}
+        oldCurrency={data.settings.devise}
+        newCurrency={pendingCurrency}
+        data={data}
+      />
+    </div>
+  );
+};
+
+  // Données selon la période active
+  const metriques = useMemo(() => {
+    const soldeTotalComptes = calculateurs.soldeTotalComptes(data.comptes);
+
+    let entreesPeriode, depensesPeriode, epargneRealisee;
+
+    if (activeTab === "mensuel") {
+      entreesPeriode = calculateurs.entreesMois(
+        data.transactions,
+        moisSelectionne,
+        anneeSelectionnee
+      );
+      depensesPeriode = calculateurs.depensesMois(
+        data.transactions,
+        moisSelectionne,
+        anneeSelectionnee
+      );
+      epargneRealisee = entreesPeriode - depensesPeriode;
+    } else {
+      entreesPeriode = calculateurs.entreesAnnee(
+        data.transactions,
+        anneeSelectionnee
+      );
+      depensesPeriode = calculateurs.depensesAnnee(
+        data.transactions,
+        anneeSelectionnee
+      );
+      epargneRealisee = entreesPeriode - depensesPeriode;
+    }
+
+    return {
+      soldeTotalComptes,
+      entreesPeriode,
+      depensesPeriode,
+      epargneRealisee,
+    };
+  }, [
+    data.comptes,
+    data.transactions,
+    activeTab,
+    moisSelectionne,
+    anneeSelectionnee,
+  ]);
+
+  const transactionsRecentes = useMemo(
+    () =>
+      data.transactions
+        .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+        .slice(0, 5),
+    [data.transactions]
+  );
+
+  const repartitionDepenses = useMemo(() => {
+    if (activeTab === "mensuel") {
+      return calculateurs.repartitionDepenses(
+        data.transactions,
+        data.categories,
+        moisSelectionne,
+        anneeSelectionnee
+      );
+    } else {
+      return calculateurs.repartitionDepenses(
+        data.transactions,
+        data.categories,
+        undefined,
+        anneeSelectionnee
+      );
+    }
+  }, [
+    data.transactions,
+    data.categories,
+    activeTab,
+    moisSelectionne,
+    anneeSelectionnee,
+  ]);
+
+  const evolutionData = useMemo(() => {
+    if (activeTab === "mensuel") {
+      return calculateurs.evolutionMensuelleAnnee(
+        data.transactions,
+        anneeSelectionnee
+      );
+    } else {
+      return calculateurs.evolutionAnnuelle(data.transactions, 5);
+    }
+  }, [data.transactions, activeTab, anneeSelectionnee]);
+
+  // Générer les options d'années (5 dernières années à partir de l'année en cours)
+  const anneesDisponibles = useMemo(() => {
+    const anneeActuelle = new Date().getFullYear();
+    const annees = [];
+    for (let i = 0; i < 5; i++) {
+      annees.push(anneeActuelle - i);
+    }
+    return annees;
+  }, []);
+
+  const moisNoms = [
+    "Janvier",
+    "Février",
+    "Mars",
+    "Avril",
+    "Mai",
+    "Juin",
+    "Juillet",
+    "Août",
+    "Septembre",
+    "Octobre",
+    "Novembre",
+    "Décembre",
+  ];
+
+  const getPeriodeLabel = () => {
+    if (activeTab === "mensuel") {
+      return `${moisNoms[moisSelectionne]} ${anneeSelectionnee}`;
+    } else {
+      return `Année ${anneeSelectionnee}`;
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col lg:flex-row lg:justify-between lg:items-center gap-4">
+        <div>
+          <h1 className="text-3xl font-bold text-gray-900">Dashboard</h1>
+          <p className="text-gray-600">
+            {new Date().toLocaleDateString("fr-FR", {
+              weekday: "long",
+              year: "numeric",
+              month: "long",
+              day: "numeric",
+            })}
+          </p>
+        </div>
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            <label className="text-sm font-medium text-gray-700">
+              Devise :
+            </label>
+            <select
+              value={data.settings.devise}
+              onChange={(e) => handleDeviseChange(e.target.value)}
+              className="border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-emerald-500 bg-white"
+            >
+              {deviseOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex gap-2">
+            <Button variant="ghost" size="sm" onClick={handleExport}>
+              <Download className="w-4 h-4 mr-2" />
+              Export
+            </Button>
+            <Button variant="ghost" size="sm" onClick={handleActualiser}>
+              <RefreshCw className="w-4 h-4 mr-2" />
+              Actualiser
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      {/* Onglets de période */}
+      <Card>
+        <div className="flex flex-col space-y-4">
+          {/* Navigation des onglets */}
+          <div className="border-b border-gray-200">
+            <nav className="-mb-px flex space-x-8">
+              {[
+                { id: "mensuel", name: "Vue Mensuelle", icon: Calendar },
+                { id: "annuel", name: "Vue Annuelle", icon: BarChart },
+              ].map((tab) => {
+                const IconComponent = tab.icon;
+                return (
+                  <button
+                    key={tab.id}
+                    onClick={() => setActiveTab(tab.id)}
+                    className={`flex items-center gap-2 py-2 px-1 border-b-2 font-medium text-sm ${
+                      activeTab === tab.id
+                        ? "border-emerald-500 text-emerald-600"
+                        : "border-transparent text-gray-500 hover:text-gray-700"
+                    }`}
+                  >
+                    <IconComponent className="w-4 h-4" />
+                    {tab.name}
+                  </button>
+                );
+              })}
+            </nav>
+          </div>
+
+          {/* Sélecteurs de période */}
+          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
+            <div className="flex items-center gap-2">
+              <label className="text-sm font-medium text-gray-700">
+                Période :
+              </label>
+              <span className="text-lg font-semibold text-emerald-600">
+                {getPeriodeLabel()}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2">
+              {activeTab === "mensuel" && (
+                <select
+                  value={moisSelectionne}
+                  onChange={(e) => setMoisSelectionne(parseInt(e.target.value))}
+                  className="border border-gray-300 rounded-md px-3 py-1 text-sm focus:ring-2 focus:ring-emerald-500"
+                >
+                  {moisNoms.map((mois, index) => (
+                    <option key={index} value={index}>
+                      {mois}
+                    </option>
+                  ))}
+                </select>
+              )}
+
+              <select
+                value={anneeSelectionnee}
+                onChange={(e) => setAnneeSelectionnee(parseInt(e.target.value))}
+                className="border border-gray-300 rounded-md px-3 py-1 text-sm focus:ring-2 focus:ring-emerald-500"
+              >
+                {anneesDisponibles.map((annee) => (
+                  <option key={annee} value={annee}>
+                    {annee}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => {
+                const aujourd = new Date();
+                setMoisSelectionne(aujourd.getMonth());
+                setAnneeSelectionnee(aujourd.getFullYear());
+              }}
+            >
+              Aujourd'hui
+            </Button>
+          </div>
+        </div>
+      </Card>
+
+      {/* KPIs adaptés à la période */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+        <KPICard
+          title="Solde Total"
+          value={formatCurrency(
+            metriques.soldeTotalComptes,
+            data.settings.devise
+          )}
+          icon={<DollarSign className="w-6 h-6 text-emerald-600" />}
+          color="text-gray-900"
+          subtitle={`${
+            data.comptes.filter((c) => c.actif).length
+          } comptes actifs`}
+        />
+        <KPICard
+          title={
+            activeTab === "mensuel" ? "Entrées du mois" : "Entrées de l'année"
+          }
+          value={formatCurrency(metriques.entreesPeriode, data.settings.devise)}
+          icon={<ArrowUp className="w-6 h-6 text-green-600" />}
+          color="text-green-600"
+        />
+        <KPICard
+          title={
+            activeTab === "mensuel" ? "Dépenses du mois" : "Dépenses de l'année"
+          }
+          value={formatCurrency(
+            metriques.depensesPeriode,
+            data.settings.devise
+          )}
+          icon={<ArrowDown className="w-6 h-6 text-red-600" />}
+          color="text-red-600"
+        />
+        <KPICard
+          title={
+            activeTab === "mensuel" ? "Épargne mensuelle" : "Épargne annuelle"
+          }
+          value={formatCurrency(
+            metriques.epargneRealisee,
+            data.settings.devise
+          )}
+          icon={<Target className="w-6 h-6 text-blue-600" />}
+          color={
+            metriques.epargneRealisee >= 0 ? "text-emerald-600" : "text-red-600"
+          }
+          subtitle={`Taux: ${
+            metriques.entreesPeriode > 0
+              ? (
+                  (metriques.epargneRealisee / metriques.entreesPeriode) *
+                  100
+                ).toFixed(1)
+              : 0
+          }%`}
+        />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Répartition des dépenses pour la période */}
+        <Card>
+          <h3 className="text-lg font-semibold mb-4">
+            Répartition des Dépenses - {getPeriodeLabel()}
+          </h3>
+          {repartitionDepenses.length > 0 ? (
+            <ResponsiveContainer width="100%" height={250}>
+              <RechartsPieChart>
+                <Pie
+                  dataKey="value"
+                  data={repartitionDepenses}
+                  cx="50%"
+                  cy="50%"
+                  labelLine={false}
+                  label={({ name, percent }) =>
+                    `${name} ${(percent * 100).toFixed(0)}%`
+                  }
+                  outerRadius={80}
+                >
+                  {repartitionDepenses.map((entry, index) => (
+                    <Cell key={`cell-${index}`} fill={entry.color} />
+                  ))}
+                </Pie>
+                <Tooltip
+                  formatter={(value) =>
+                    formatCurrency(Number(value), data.settings.devise)
+                  }
+                />
+              </RechartsPieChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="flex items-center justify-center h-64 text-gray-500">
+              <div className="text-center">
+                <PieChart className="w-12 h-12 mx-auto mb-2 opacity-50" />
+                <p>Aucune dépense pour cette période</p>
+              </div>
+            </div>
+          )}
+        </Card>
+
+        {/* Transactions récentes */}
+        <Card>
+          <h3 className="text-lg font-semibold mb-4">Transactions Récentes</h3>
+          <div className="space-y-3">
+            {transactionsRecentes.length > 0 ? (
+              transactionsRecentes.map((transaction) => {
+                const compte = data.comptes.find(
+                  (c) => c.id === transaction.compte
+                );
+                const categorie = data.categories.find(
+                  (c) => c.nom === transaction.categorie
+                );
+
+                return (
+                  <div
+                    key={transaction.id}
+                    className="flex items-center justify-between p-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors"
+                  >
+                    <div className="flex items-center gap-3 flex-1">
+                      <div
+                        className="w-3 h-3 rounded-full"
+                        style={{
+                          backgroundColor: categorie?.couleur || "#gray",
+                        }}
+                      />
+                      <div className="flex-1">
+                        <p className="font-medium text-gray-900 text-sm">
+                          {transaction.description}
+                        </p>
+                        <p className="text-xs text-gray-500">
+                          {formatDate(transaction.date)} •{" "}
+                          {transaction.categorie} •{" "}
+                          {compte?.nom || "Compte inconnu"}
+                        </p>
+                      </div>
+                    </div>
+                    <div
+                      className={`font-semibold text-sm ${
+                        transaction.montant >= 0
+                          ? "text-green-600"
+                          : "text-red-600"
+                      }`}
+                    >
+                      {transaction.montant >= 0 ? "+" : ""}
+                      {formatCurrency(
+                        transaction.montant,
+                        data.settings.devise
+                      )}
+                    </div>
+                  </div>
+                );
+              })
+            ) : (
+              <div className="flex items-center justify-center h-32 text-gray-500">
+                <div className="text-center">
+                  <Receipt className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                  <p>Aucune transaction</p>
+                </div>
+              </div>
+            )}
+          </div>
+        </Card>
+      </div>
+
+      {/* Graphique d'évolution adapté */}
+      {evolutionData.length > 0 && (
+        <Card>
+          <h3 className="text-lg font-semibold mb-4">
+            {activeTab === "mensuel"
+              ? `Évolution mensuelle ${anneeSelectionnee}`
+              : "Évolution sur 5 ans"}
+          </h3>
+          <ResponsiveContainer width="100%" height={300}>
+            <RechartsLineChart data={evolutionData}>
+              <CartesianGrid strokeDasharray="3 3" className="opacity-30" />
+              <XAxis dataKey={activeTab === "mensuel" ? "mois" : "annee"} />
+              <YAxis />
+              <Tooltip
+                formatter={(value, name) => [
+                  formatCurrency(Number(value), data.settings.devise),
+                  name,
+                ]}
+                labelFormatter={(label) =>
+                  activeTab === "mensuel" ? `Mois: ${label}` : `Année: ${label}`
+                }
+              />
+              <Legend />
+              <Line
+                type="monotone"
+                dataKey="entrees"
+                stroke="#10b981"
+                strokeWidth={2}
+                name="Entrées"
+                dot={{ fill: "#10b981", strokeWidth: 2, r: 4 }}
+              />
+              <Line
+                type="monotone"
+                dataKey="depenses"
+                stroke="#ef4444"
+                strokeWidth={2}
+                name="Dépenses"
+                dot={{ fill: "#ef4444", strokeWidth: 2, r: 4 }}
+              />
+              <Line
+                type="monotone"
+                dataKey="epargne"
+                stroke="#6366f1"
+                strokeWidth={2}
+                name="Épargne"
+                dot={{ fill: "#6366f1", strokeWidth: 2, r: 4 }}
+              />
+            </RechartsLineChart>
+          </ResponsiveContainer>
+        </Card>
+      )}
+
+      {/* Résumé et alertes */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <Card>
+          <h3 className="text-lg font-semibold mb-4">Résumé Statistiques</h3>
+          <div className="space-y-4">
+            <div className="flex justify-between items-center">
+              <span className="text-gray-600">Total comptes</span>
+              <span className="font-medium">{data.comptes.length}</span>
+            </div>
+            <div className="flex justify-between items-center">
+              <span className="text-gray-600">Transactions totales</span>
+              <span className="font-medium">{data.transactions.length}</span>
+            </div>
+            <div className="flex justify-between items-center">
+              <span className="text-gray-600">Catégories</span>
+              <span className="font-medium">{data.categories.length}</span>
+            </div>
+            <div className="flex justify-between items-center">
+              <span className="text-gray-600">Banques utilisées</span>
+              <span className="font-medium">
+                {[...new Set(data.comptes.map((c) => c.banque))].length}
+              </span>
+            </div>
+          </div>
+        </Card>
+
+        {/* Système d'alerte pour budget dépassé */}
+        {metriques.epargneRealisee < 0 ? (
+          <Card className="border-red-200 bg-red-50">
+            <div className="flex items-center gap-3">
+              <AlertTriangle className="w-5 h-5 text-red-600 flex-shrink-0" />
+              <div className="flex-1">
+                <h4 className="font-semibold text-red-800">
+                  Attention - Budget dépassé
+                </h4>
+                <p className="text-red-700">
+                  Les dépenses de cette période dépassent les entrées de{" "}
+                  {formatCurrency(
+                    Math.abs(metriques.epargneRealisee),
+                    data.settings.devise
+                  )}
+                </p>
+                <p className="text-red-600 text-sm mt-1">
+                  Période concernée : {getPeriodeLabel()}
+                </p>
+              </div>
+            </div>
+          </Card>
+        ) : (
+          <Card className="border-green-200 bg-green-50">
+            <div className="flex items-center gap-3">
+              <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0" />
+              <div className="flex-1">
+                <h4 className="font-semibold text-green-800">
+                  Budget équilibré
+                </h4>
+                <p className="text-green-700">
+                  Épargne réalisée :{" "}
+                  {formatCurrency(
+                    metriques.epargneRealisee,
+                    data.settings.devise
+                  )}
+                </p>
+                <p className="text-green-600 text-sm mt-1">
+                  Taux d'épargne :{" "}
+                  {metriques.entreesPeriode > 0
+                    ? (
+                        (metriques.epargneRealisee / metriques.entreesPeriode) *
+                        100
+                      ).toFixed(1)
+                    : 0}
+                  %
+                </p>
+              </div>
+            </div>
+          </Card>
+        )}
+      </div>
+
+      {/* Modal d'export */}
+      <ExportModal
+        isOpen={showExportModal}
+        onClose={() => setShowExportModal(false)}
+        data={data}
+      />
+    </div>
+  );
+};
+
+// ==================== BUDGET PRÉVISIONNEL COMPONENT ====================
+const BudgetPrevisionnelPage: React.FC<{
+  data: AppData;
+  onUpdateData: (data: AppData) => void;
+}> = ({ data, onUpdateData }) => {
+  const [activeTab, setActiveTab] = useState("depenses");
+  const [showModal, setShowModal] = useState(false);
+  const [modalType, setModalType] = useState<"depense" | "objectif">("depense");
+  const [editingItem, setEditingItem] = useState<
+    DepensePrevisionnelle | ObjectifFinancier | null
+  >(null);
+
+  const [formDataDepense, setFormDataDepense] = useState({
+    nom: "",
+    montant: 0,
+    type: "depense" as "depense" | "entree",
+    categorie: "",
+    compte: "",
+    datePrevue: new Date().toISOString().split("T")[0],
+    recurrente: false,
+    notes: "",
+  });
+
+  const [formDataObjectif, setFormDataObjectif] = useState({
+    nom: "",
+    type: "epargne" as "epargne" | "achat",
+    montantCible: 0,
+    montantActuel: 0,
+    dateEcheance: new Date().toISOString().split("T")[0],
+    compte: "",
+    contributionMensuelle: 0,
+    notes: "",
+  });
+
+  const resetForms = () => {
+    setFormDataDepense({
+      nom: "",
+      montant: 0,
+      type: "depense",
+      categorie: "",
+      compte: data.comptes.length > 0 ? data.comptes[0].id : "",
+      datePrevue: new Date().toISOString().split("T")[0],
+      recurrente: false,
+      notes: "",
+    });
+    setFormDataObjectif({
+      nom: "",
+      type: "epargne",
+      montantCible: 0,
+      montantActuel: 0,
+      dateEcheance: new Date().toISOString().split("T")[0],
+      compte: data.comptes.length > 0 ? data.comptes[0].id : "",
+      contributionMensuelle: 0,
+      notes: "",
+    });
+    setEditingItem(null);
+  };
+
+  const handleAddDepense = () => {
+    setModalType("depense");
+    setShowModal(true);
+  };
+
+  const handleAddObjectif = () => {
+    setModalType("objectif");
+    setShowModal(true);
+  };
+
+  const handleSubmitDepense = () => {
+    if (
+      !formDataDepense.nom ||
+      !formDataDepense.categorie ||
+      !formDataDepense.compte
+    )
+      return;
+
+    const newDepense: DepensePrevisionnelle = {
+      id: (editingItem as DepensePrevisionnelle)?.id || generateId(),
+      nom: formDataDepense.nom,
+      montant: formDataDepense.montant,
+      type: formDataDepense.type,
+      categorie: formDataDepense.categorie,
+      compte: formDataDepense.compte,
+      statut: "en_cours",
+      datePrevue: new Date(formDataDepense.datePrevue),
+      recurrente: formDataDepense.recurrente,
+      notes: formDataDepense.notes || undefined,
+    };
+
+    let newData: AppData;
+
+    if (editingItem && "statut" in editingItem) {
+      newData = {
+        ...data,
+        depensesPrevisionnelles: data.depensesPrevisionnelles.map((d) =>
+          d.id === editingItem.id ? newDepense : d
+        ),
+      };
+    } else {
+      newData = {
+        ...data,
+        depensesPrevisionnelles: [...data.depensesPrevisionnelles, newDepense],
+      };
+    }
+
+    onUpdateData(newData);
+    setShowModal(false);
+    resetForms();
+  };
+
+  const handleSubmitObjectif = () => {
+    if (!formDataObjectif.nom || !formDataObjectif.compte) return;
+
+    const newObjectif: ObjectifFinancier = {
+      id: (editingItem as ObjectifFinancier)?.id || generateId(),
+      nom: formDataObjectif.nom,
+      type: formDataObjectif.type,
+      montantCible: formDataObjectif.montantCible,
+      montantActuel: formDataObjectif.montantActuel,
+      dateEcheance: new Date(formDataObjectif.dateEcheance),
+      compte: formDataObjectif.compte,
+      statut: "en_cours",
+      contributionMensuelle:
+        formDataObjectif.contributionMensuelle || undefined,
+      notes: formDataObjectif.notes || undefined,
+    };
+
+    let newData: AppData;
+
+    if (editingItem && "montantCible" in editingItem) {
+      newData = {
+        ...data,
+        objectifsFinanciers: data.objectifsFinanciers.map((o) =>
+          o.id === editingItem.id ? newObjectif : o
+        ),
+      };
+    } else {
+      newData = {
+        ...data,
+        objectifsFinanciers: [...data.objectifsFinanciers, newObjectif],
+      };
+    }
+
+    onUpdateData(newData);
+    setShowModal(false);
+    resetForms();
+  };
+
+  const handleEditDepense = (depense: DepensePrevisionnelle) => {
+    setEditingItem(depense);
+    setFormDataDepense({
+      nom: depense.nom,
+      montant: depense.montant,
+      type: depense.type,
+      categorie: depense.categorie,
+      compte: depense.compte,
+      datePrevue: depense.datePrevue.toISOString().split("T")[0],
+      recurrente: depense.recurrente,
+      notes: depense.notes || "",
+    });
+    setModalType("depense");
+    setShowModal(true);
+  };
+
+  const handleEditObjectif = (objectif: ObjectifFinancier) => {
+    setEditingItem(objectif);
+    setFormDataObjectif({
+      nom: objectif.nom,
+      type: objectif.type,
+      montantCible: objectif.montantCible,
+      montantActuel: objectif.montantActuel,
+      dateEcheance: objectif.dateEcheance.toISOString().split("T")[0],
+      compte: objectif.compte,
+      contributionMensuelle: objectif.contributionMensuelle || 0,
+      notes: objectif.notes || "",
+    });
+    setModalType("objectif");
+    setShowModal(true);
+  };
+
+  const handleDeleteDepense = (depenseId: string) => {
+    if (
+      confirm("Êtes-vous sûr de vouloir supprimer ce budget prévisionnel ?")
+    ) {
+      const newData = {
+        ...data,
+        depensesPrevisionnelles: data.depensesPrevisionnelles.filter(
+          (d) => d.id !== depenseId
+        ),
+      };
+      onUpdateData(newData);
+    }
+  };
+
+  const handleDeleteObjectif = (objectifId: string) => {
+    if (confirm("Êtes-vous sûr de vouloir supprimer cet objectif ?")) {
+      const newData = {
+        ...data,
+        objectifsFinanciers: data.objectifsFinanciers.filter(
+          (o) => o.id !== objectifId
+        ),
+      };
+      onUpdateData(newData);
+    }
+  };
+
+  const handleMarquerEffectuee = (depenseId: string) => {
+    const depense = data.depensesPrevisionnelles.find(
+      (d) => d.id === depenseId
+    );
+    if (!depense) return;
+
+    // Créer la transaction correspondante
+    const newTransaction: Transaction = {
+      id: generateId(),
+      date: new Date(),
+      montant:
+        depense.type === "depense"
+          ? -Math.abs(depense.montant)
+          : Math.abs(depense.montant),
+      type: depense.type,
+      categorie: depense.categorie,
+      description: `${depense.nom} (Budget prévisionnel)`,
+      compte: depense.compte,
+      recurrente: false,
+    };
+
+    // Mettre à jour le solde du compte
+    const compteIndex = data.comptes.findIndex((c) => c.id === depense.compte);
+    if (compteIndex === -1) return;
+
+    const nouveauxComptes = [...data.comptes];
+    nouveauxComptes[compteIndex] = {
+      ...nouveauxComptes[compteIndex],
+      solde: nouveauxComptes[compteIndex].solde + newTransaction.montant,
+    };
+
+    // Marquer la dépense comme effectuée
+    const nouvellesDepenses = data.depensesPrevisionnelles.map((d) =>
+      d.id === depenseId
+        ? { ...d, statut: "effectuee" as const, dateRealisee: new Date() }
+        : d
+    );
+
+    const newData = {
+      ...data,
+      transactions: [...data.transactions, newTransaction],
+      comptes: nouveauxComptes,
+      depensesPrevisionnelles: nouvellesDepenses,
+    };
+
+    onUpdateData(newData);
+  };
+
+  const depensesEnCours = data.depensesPrevisionnelles.filter(
+    (d) => d.statut === "en_cours"
+  );
+  const depensesEffectuees = data.depensesPrevisionnelles.filter(
+    (d) => d.statut === "effectuee"
+  );
+  const objectifsActifs = data.objectifsFinanciers.filter(
+    (o) => o.statut !== "abandonne"
+  );
+
+  const totalPrevuMois = calculateurs.budgetPrevisionnel.totalPrevuMois(
+    data.depensesPrevisionnelles,
+    "depense"
+  );
+  const totalRealiseMois = calculateurs.budgetPrevisionnel.totalRealiseMois(
+    data.depensesPrevisionnelles,
+    "depense"
+  );
+  const entreesPrevuesMois = calculateurs.budgetPrevisionnel.totalPrevuMois(
+    data.depensesPrevisionnelles,
+    "entree"
+  );
+  const entreesRealisesMois = calculateurs.budgetPrevisionnel.totalRealiseMois(
+    data.depensesPrevisionnelles,
+    "entree"
+  );
+
+  const progressionObjectifs =
+    calculateurs.budgetPrevisionnel.progressionObjectifs(
+      data.objectifsFinanciers
+    );
+
+  const categoriesDisponiblesDepense =
+    formDataDepense.type === "entree"
+      ? data.categories.filter((c) => c.type === "entree")
+      : data.categories.filter((c) => c.type === "depense");
+
+  return (
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <div>
+          <h1 className="text-3xl font-bold text-gray-900">
+            Budget Prévisionnel
+          </h1>
+          <p className="text-gray-600">
+            Planifiez et suivez vos dépenses prévisionnelles et objectifs
+          </p>
+        </div>
+      </div>
+
+      {/* KPIs */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+        <KPICard
+          title="Dépenses Prévues"
+          value={formatCurrency(totalPrevuMois, data.settings.devise)}
+          icon={<Target className="w-6 h-6 text-orange-600" />}
+          color="text-orange-600"
+          subtitle="Ce mois"
+        />
+        <KPICard
+          title="Dépenses Réalisées"
+          value={formatCurrency(totalRealiseMois, data.settings.devise)}
+          icon={<CheckCircle className="w-6 h-6 text-green-600" />}
+          color="text-green-600"
+          subtitle="Ce mois"
+        />
+        <KPICard
+          title="Écart Budget"
+          value={formatCurrency(
+            totalRealiseMois - totalPrevuMois,
+            data.settings.devise
+          )}
+          icon={<BarChart className="w-6 h-6 text-blue-600" />}
+          color={
+            totalRealiseMois > totalPrevuMois
+              ? "text-red-600"
+              : "text-green-600"
+          }
+          subtitle={
+            totalRealiseMois > totalPrevuMois ? "Dépassement" : "Sous budget"
+          }
+        />
+        <KPICard
+          title="Objectifs Actifs"
+          value={objectifsActifs.length.toString()}
+          icon={<TrendingUp className="w-6 h-6 text-purple-600" />}
+          color="text-purple-600"
+          subtitle={`${
+            progressionObjectifs.filter((o) => o.progression >= 100).length
+          } atteints`}
+        />
+      </div>
+
+      {/* Onglets */}
+      <Card>
+        <div className="border-b border-gray-200 mb-6">
+          <nav className="-mb-px flex space-x-8">
+            {[
+              {
+                id: "depenses",
+                name: "Budget Prévisionnel",
+                count: data.depensesPrevisionnelles.length,
+              },
+              {
+                id: "objectifs",
+                name: "Objectifs Financiers",
+                count: data.objectifsFinanciers.length,
+              },
+            ].map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`flex items-center gap-2 py-2 px-1 border-b-2 font-medium text-sm ${
+                  activeTab === tab.id
+                    ? "border-emerald-500 text-emerald-600"
+                    : "border-transparent text-gray-500 hover:text-gray-700"
+                }`}
+              >
+                {tab.name}
+                <span className="bg-gray-200 text-gray-600 px-2 py-1 rounded-full text-xs">
+                  {tab.count}
+                </span>
+              </button>
+            ))}
+          </nav>
+        </div>
+
+        {activeTab === "depenses" && (
+          <div className="space-y-6">
+            <div className="flex justify-between items-center">
+              <h3 className="text-lg font-semibold">Budget Prévisionnel</h3>
+              <Button onClick={handleAddDepense}>
+                <Plus className="w-4 h-4 mr-2" />
+                Nouveau budget
+              </Button>
+            </div>
+
+            {/* Dépenses en cours */}
+            <div>
+              <h4 className="text-md font-semibold mb-3 text-orange-600">
+                En cours ({depensesEnCours.length})
+              </h4>
+              {depensesEnCours.length > 0 ? (
+                <div className="space-y-3">
+                  {depensesEnCours.map((depense) => {
+                    const compte = data.comptes.find(
+                      (c) => c.id === depense.compte
+                    );
+                    const categorie = data.categories.find(
+                      (c) => c.nom === depense.categorie
+                    );
+                    const joursRestants = Math.ceil(
+                      (depense.datePrevue.getTime() - new Date().getTime()) /
+                        (1000 * 3600 * 24)
+                    );
+
+                    return (
+                      <div
+                        key={depense.id}
+                        className="p-4 border border-orange-200 bg-orange-50 rounded-lg"
+                      >
+                        <div className="flex items-center justify-between">
+                          <div className="flex-1">
+                            <div className="flex items-center gap-3">
+                              <div
+                                className="w-3 h-3 rounded-full"
+                                style={{
+                                  backgroundColor:
+                                    categorie?.couleur || "#gray",
+                                }}
+                              />
+                              <div>
+                                <h5 className="font-semibold text-gray-900">
+                                  {depense.nom}
+                                </h5>
+                                <p className="text-sm text-gray-600">
+                                  {depense.categorie} • {compte?.nom} •{" "}
+                                  {formatDate(depense.datePrevue)}
+                                  {depense.recurrente && " • Récurrent"}
+                                </p>
+                                {joursRestants <= 7 && joursRestants >= 0 && (
+                                  <p className="text-xs text-orange-600 font-medium">
+                                    Dans {joursRestants} jour
+                                    {joursRestants > 1 ? "s" : ""}
+                                  </p>
+                                )}
+                                {joursRestants < 0 && (
+                                  <p className="text-xs text-red-600 font-medium">
+                                    En retard de {Math.abs(joursRestants)} jour
+                                    {Math.abs(joursRestants) > 1 ? "s" : ""}
+                                  </p>
+                                )}
+                                {depense.notes && (
+                                  <p className="text-xs text-gray-500 mt-1">
+                                    {depense.notes}
+                                  </p>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-4">
+                            <div
+                              className={`text-lg font-semibold ${
+                                depense.type === "depense"
+                                  ? "text-red-600"
+                                  : "text-green-600"
+                              }`}
+                            >
+                              {depense.type === "depense" ? "-" : "+"}
+                              {formatCurrency(
+                                depense.montant,
+                                data.settings.devise
+                              )}
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <Button
+                                size="sm"
+                                onClick={() =>
+                                  handleMarquerEffectuee(depense.id)
+                                }
+                                className="bg-green-500 hover:bg-green-600"
+                              >
+                                <CheckCircle className="w-4 h-4 mr-1" />
+                                Effectué
+                              </Button>
+                              <button
+                                onClick={() => handleEditDepense(depense)}
+                                className="p-2 text-blue-600 hover:bg-blue-100 rounded-md transition-colors"
+                                title="Modifier"
+                              >
+                                <Edit className="w-4 h-4" />
+                              </button>
+                              <button
+                                onClick={() => handleDeleteDepense(depense.id)}
+                                className="p-2 text-red-600 hover:bg-red-100 rounded-md transition-colors"
+                                title="Supprimer"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="text-center py-8 text-gray-500">
+                  <Calendar className="w-12 h-12 mx-auto mb-3 opacity-50" />
+                  <p>Aucun budget prévisionnel en cours</p>
+                </div>
+              )}
+            </div>
+
+            {/* Dépenses effectuées */}
+            <div>
+              <h4 className="text-md font-semibold mb-3 text-green-600">
+                Effectuées ({depensesEffectuees.length})
+              </h4>
+              {depensesEffectuees.length > 0 ? (
+                <div className="space-y-3">
+                  {depensesEffectuees.slice(0, 5).map((depense) => {
+                    const compte = data.comptes.find(
+                      (c) => c.id === depense.compte
+                    );
+                    const categorie = data.categories.find(
+                      (c) => c.nom === depense.categorie
+                    );
+
+                    return (
+                      <div
+                        key={depense.id}
+                        className="p-4 border border-green-200 bg-green-50 rounded-lg"
+                      >
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-3 flex-1">
+                            <CheckCircle className="w-5 h-5 text-green-600" />
+                            <div
+                              className="w-3 h-3 rounded-full"
+                              style={{
+                                backgroundColor: categorie?.couleur || "#gray",
+                              }}
+                            />
+                            <div>
+                              <h5 className="font-semibold text-gray-900">
+                                {depense.nom}
+                              </h5>
+                              <p className="text-sm text-gray-600">
+                                {depense.categorie} • {compte?.nom} • Réalisé le{" "}
+                                {depense.dateRealisee
+                                  ? formatDate(depense.dateRealisee)
+                                  : "N/A"}
+                              </p>
+                            </div>
+                          </div>
+                          <div
+                            className={`text-lg font-semibold ${
+                              depense.type === "depense"
+                                ? "text-red-600"
+                                : "text-green-600"
+                            }`}
+                          >
+                            {depense.type === "depense" ? "-" : "+"}
+                            {formatCurrency(
+                              depense.montant,
+                              data.settings.devise
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {depensesEffectuees.length > 5 && (
+                    <p className="text-center text-sm text-gray-500">
+                      ... et {depensesEffectuees.length - 5} autres dépenses
+                      effectuées
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <div className="text-center py-4 text-gray-500">
+                  <p className="text-sm">Aucune dépense effectuée ce mois</p>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {activeTab === "objectifs" && (
+          <div className="space-y-6">
+            <div className="flex justify-between items-center">
+              <h3 className="text-lg font-semibold">Objectifs Financiers</h3>
+              <Button onClick={handleAddObjectif}>
+                <Plus className="w-4 h-4 mr-2" />
+                Nouvel objectif
+              </Button>
+            </div>
+
+            {progressionObjectifs.length > 0 ? (
+              <div className="space-y-4">
+                {progressionObjectifs.map((objectif) => {
+                  const compte = data.comptes.find(
+                    (c) => c.id === objectif.compte
+                  );
+                  const pourcentage = Math.min(objectif.progression, 100);
+                  const estAtteint = pourcentage >= 100;
+
+                  return (
+                    <div
+                      key={objectif.id}
+                      className={`p-6 border rounded-lg ${
+                        estAtteint
+                          ? "border-green-200 bg-green-50"
+                          : "border-gray-200 bg-white"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-4">
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2 mb-2">
+                            <h5 className="font-semibold text-lg text-gray-900">
+                              {objectif.nom}
+                            </h5>
+                            {estAtteint && (
+                              <CheckCircle className="w-5 h-5 text-green-600" />
+                            )}
+                          </div>
+                          <p className="text-sm text-gray-600">
+                            {objectif.type === "epargne" ? "Épargne" : "Achat"}{" "}
+                            • {compte?.nom} • Échéance:{" "}
+                            {formatDate(objectif.dateEcheance)}
+                          </p>
+                          {objectif.joursRestants > 0 && (
+                            <p className="text-xs text-gray-500 mt-1">
+                              {objectif.joursRestants} jours restants
+                            </p>
+                          )}
+                          {objectif.notes && (
+                            <p className="text-xs text-gray-500 mt-1">
+                              {objectif.notes}
+                            </p>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => handleEditObjectif(objectif)}
+                            className="p-2 text-blue-600 hover:bg-blue-100 rounded-md transition-colors"
+                            title="Modifier"
+                          >
+                            <Edit className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => handleDeleteObjectif(objectif.id)}
+                            className="p-2 text-red-600 hover:bg-red-100 rounded-md transition-colors"
+                            title="Supprimer"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="space-y-3">
+                        <div className="flex justify-between text-sm">
+                          <span>Progression</span>
+                          <span className="font-medium">
+                            {pourcentage.toFixed(1)}%
+                          </span>
+                        </div>
+
+                        <div className="w-full bg-gray-200 rounded-full h-3">
+                          <div
+                            className={`h-3 rounded-full transition-all duration-300 ${
+                              estAtteint ? "bg-green-600" : "bg-blue-600"
+                            }`}
+                            style={{ width: `${pourcentage}%` }}
+                          />
+                        </div>
+
+                        <div className="flex justify-between text-sm">
+                          <div>
+                            <span className="text-gray-600">Actuel: </span>
+                            <span className="font-medium">
+                              {formatCurrency(
+                                objectif.montantActuel,
+                                data.settings.devise
+                              )}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-gray-600">Cible: </span>
+                            <span className="font-medium">
+                              {formatCurrency(
+                                objectif.montantCible,
+                                data.settings.devise
+                              )}
+                            </span>
+                          </div>
+                        </div>
+
+                        {!estAtteint && (
+                          <div className="flex justify-between text-sm">
+                            <div>
+                              <span className="text-gray-600">Restant: </span>
+                              <span className="font-medium text-orange-600">
+                                {formatCurrency(
+                                  objectif.restant,
+                                  data.settings.devise
+                                )}
+                              </span>
+                            </div>
+                            {objectif.contributionMensuelle && (
+                              <div>
+                                <span className="text-gray-600">
+                                  Contribution mensuelle:{" "}
+                                </span>
+                                <span className="font-medium">
+                                  {formatCurrency(
+                                    objectif.contributionMensuelle,
+                                    data.settings.devise
+                                  )}
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="text-center py-8 text-gray-500">
+                <Target className="w-16 h-16 mx-auto mb-4 opacity-50" />
+                <p className="text-lg">Aucun objectif financier</p>
+                <p className="text-sm">
+                  Commencez par définir vos premiers objectifs
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+      </Card>
+
+      {/* Modal */}
+      <Modal
+        isOpen={showModal}
+        onClose={() => {
+          setShowModal(false);
+          resetForms();
+        }}
+        title={
+          modalType === "depense"
+            ? editingItem && "statut" in editingItem
+              ? "Modifier le budget"
+              : "Nouveau budget prévisionnel"
+            : editingItem && "montantCible" in editingItem
+            ? "Modifier l'objectif"
+            : "Nouvel objectif financier"
+        }
+        size="lg"
+      >
+        {modalType === "depense" ? (
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Nom du budget
+              </label>
+              <input
+                type="text"
+                value={formDataDepense.nom}
+                onChange={(e) =>
+                  setFormDataDepense({
+                    ...formDataDepense,
+                    nom: e.target.value,
+                  })
+                }
+                className="w-full border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-emerald-500"
+                placeholder="Ex: Loyer septembre"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Type
+                </label>
+                <select
+                  value={formDataDepense.type}
+                  onChange={(e) =>
+                    setFormDataDepense({
+                      ...formDataDepense,
+                      type: e.target.value as "depense" | "entree",
+                      categorie: "",
+                    })
+                  }
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-emerald-500"
+                >
+                  <option value="depense">Dépense</option>
+                  <option value="entree">Entrée</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Montant ({data.settings.devise})
+                </label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={formDataDepense.montant}
+                  onChange={(e) =>
+                    setFormDataDepense({
+                      ...formDataDepense,
+                      montant: parseFloat(e.target.value) || 0,
+                    })
+                  }
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-emerald-500"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Catégorie
+                </label>
+                <select
+                  value={formDataDepense.categorie}
+                  onChange={(e) =>
+                    setFormDataDepense({
+                      ...formDataDepense,
+                      categorie: e.target.value,
+                    })
+                  }
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-emerald-500"
+                >
+                  <option value="">Sélectionner une catégorie</option>
+                  {categoriesDisponiblesDepense.map((cat) => (
+                    <option key={cat.id} value={cat.nom}>
+                      {cat.nom}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Compte
+                </label>
+                <select
+                  value={formDataDepense.compte}
+                  onChange={(e) =>
+                    setFormDataDepense({
+                      ...formDataDepense,
+                      compte: e.target.value,
+                    })
+                  }
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-emerald-500"
+                >
+                  <option value="">Sélectionner un compte</option>
+                  {data.comptes
+                    .filter((c) => c.actif)
+                    .map((compte) => (
+                      <option key={compte.id} value={compte.id}>
+                        {compte.nom}
+                      </option>
+                    ))}
+                </select>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Date prévue
+              </label>
+              <input
+                type="date"
+                value={formDataDepense.datePrevue}
+                onChange={(e) =>
+                  setFormDataDepense({
+                    ...formDataDepense,
+                    datePrevue: e.target.value,
+                  })
+                }
+                className="w-full border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-emerald-500"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Notes (optionnel)
+              </label>
+              <textarea
+                value={formDataDepense.notes}
+                onChange={(e) =>
+                  setFormDataDepense({
+                    ...formDataDepense,
+                    notes: e.target.value,
+                  })
+                }
+                rows={3}
+                className="w-full border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-emerald-500"
+                placeholder="Ajouter des notes..."
+              />
+            </div>
+
+            <div className="flex items-center">
+              <input
+                type="checkbox"
+                id="recurrenteDepense"
+                checked={formDataDepense.recurrente}
+                onChange={(e) =>
+                  setFormDataDepense({
+                    ...formDataDepense,
+                    recurrente: e.target.checked,
+                  })
+                }
+                className="mr-2"
+              />
+              <label
+                htmlFor="recurrenteDepense"
+                className="text-sm text-gray-700"
+              >
+                Dépense récurrente
+              </label>
+            </div>
+
+            <div className="flex justify-end gap-3">
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  setShowModal(false);
+                  resetForms();
+                }}
+              >
+                Annuler
+              </Button>
+              <Button onClick={handleSubmitDepense}>
+                {editingItem && "statut" in editingItem
+                  ? "Modifier"
+                  : "Ajouter"}
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Nom de l'objectif
+              </label>
+              <input
+                type="text"
+                value={formDataObjectif.nom}
+                onChange={(e) =>
+                  setFormDataObjectif({
+                    ...formDataObjectif,
+                    nom: e.target.value,
+                  })
+                }
+                className="w-full border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-emerald-500"
+                placeholder="Ex: Vacances été 2026"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Type d'objectif
+                </label>
+                <select
+                  value={formDataObjectif.type}
+                  onChange={(e) =>
+                    setFormDataObjectif({
+                      ...formDataObjectif,
+                      type: e.target.value as "epargne" | "achat",
+                    })
+                  }
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-emerald-500"
+                >
+                  <option value="epargne">Épargne</option>
+                  <option value="achat">Achat</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Compte
+                </label>
+                <select
+                  value={formDataObjectif.compte}
+                  onChange={(e) =>
+                    setFormDataObjectif({
+                      ...formDataObjectif,
+                      compte: e.target.value,
+                    })
+                  }
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-emerald-500"
+                >
+                  <option value="">Sélectionner un compte</option>
+                  {data.comptes
+                    .filter((c) => c.actif)
+                    .map((compte) => (
+                      <option key={compte.id} value={compte.id}>
+                        {compte.nom}
+                      </option>
+                    ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Montant cible ({data.settings.devise})
+                </label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={formDataObjectif.montantCible}
+                  onChange={(e) =>
+                    setFormDataObjectif({
+                      ...formDataObjectif,
+                      montantCible: parseFloat(e.target.value) || 0,
+                    })
+                  }
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-emerald-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Montant actuel ({data.settings.devise})
+                </label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={formDataObjectif.montantActuel}
+                  onChange={(e) =>
+                    setFormDataObjectif({
+                      ...formDataObjectif,
+                      montantActuel: parseFloat(e.target.value) || 0,
+                    })
+                  }
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-emerald-500"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Date d'échéance
+                </label>
+                <input
+                  type="date"
+                  value={formDataObjectif.dateEcheance}
+                  onChange={(e) =>
+                    setFormDataObjectif({
+                      ...formDataObjectif,
+                      dateEcheance: e.target.value,
+                    })
+                  }
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-emerald-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Contribution mensuelle ({data.settings.devise})
+                </label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={formDataObjectif.contributionMensuelle}
+                  onChange={(e) =>
+                    setFormDataObjectif({
+                      ...formDataObjectif,
+                      contributionMensuelle: parseFloat(e.target.value) || 0,
+                    })
+                  }
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-emerald-500"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Notes (optionnel)
+              </label>
+              <textarea
+                value={formDataObjectif.notes}
+                onChange={(e) =>
+                  setFormDataObjectif({
+                    ...formDataObjectif,
+                    notes: e.target.value,
+                  })
+                }
+                rows={3}
+                className="w-full border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-emerald-500"
+                placeholder="Ajouter des notes..."
+              />
+            </div>
+
+            <div className="flex justify-end gap-3">
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  setShowModal(false);
+                  resetForms();
+                }}
+              >
+                Annuler
+              </Button>
+              <Button onClick={handleSubmitObjectif}>
+                {editingItem && "montantCible" in editingItem
+                  ? "Modifier"
+                  : "Ajouter"}
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+    </div>
+  );
+};
+
+// ==================== TRANSACTIONS COMPONENT ====================
+const TransactionsPage: React.FC<{
+  data: AppData;
+  onUpdateData: (data: AppData) => void;
+}> = ({ data, onUpdateData }) => {
+  const [showModal, setShowModal] = useState(false);
+  const [editingTransaction, setEditingTransaction] =
+    useState<Transaction | null>(null);
+  const [filtreCategorie, setFiltreCategorie] = useState("all");
+  const [filtreType, setFiltreType] = useState("all");
+  const [searchTerm, setSearchTerm] = useState("");
+
+  const [formData, setFormData] = useState({
+    montant: 0,
+    type: "depense" as Transaction["type"],
+    categorie: "",
+    description: "",
+    compte: "",
+    date: new Date().toISOString().split("T")[0],
+    recurrente: false,
+  });
+
+  const resetForm = () => {
+    setFormData({
+      montant: 0,
+      type: "depense",
+      categorie: "",
+      description: "",
+      compte: data.comptes.length > 0 ? data.comptes[0].id : "",
+      date: new Date().toISOString().split("T")[0],
+      recurrente: false,
+    });
+    setEditingTransaction(null);
+  };
+
+  const handleSubmit = () => {
+    if (!formData.description || !formData.categorie || !formData.compte)
+      return;
+
+    const montantFinal =
+      formData.type === "depense"
+        ? -Math.abs(formData.montant)
+        : Math.abs(formData.montant);
+
+    const newTransaction: Transaction = {
+      id: editingTransaction?.id || generateId(),
+      date: new Date(formData.date),
+      montant: montantFinal,
+      type: formData.type,
+      categorie: formData.categorie,
+      description: formData.description,
+      compte: formData.compte,
+      recurrente: formData.recurrente,
+    };
+
+    let newData: AppData;
+
+    if (editingTransaction) {
+      newData = {
+        ...data,
+        transactions: data.transactions.map((t) =>
+          t.id === editingTransaction.id ? newTransaction : t
+        ),
+      };
+    } else {
+      newData = {
+        ...data,
+        transactions: [...data.transactions, newTransaction],
+      };
+    }
+
+    onUpdateData(newData);
+    setShowModal(false);
+    resetForm();
+  };
+
+  const handleEdit = (transaction: Transaction) => {
+    setEditingTransaction(transaction);
+    setFormData({
+      montant: Math.abs(transaction.montant),
+      type: transaction.type,
+      categorie: transaction.categorie,
+      description: transaction.description,
+      compte: transaction.compte,
+      date: transaction.date.toISOString().split("T")[0],
+      recurrente: transaction.recurrente,
+    });
+    setShowModal(true);
+  };
+
+  const handleDelete = (transactionId: string) => {
+    if (confirm("Êtes-vous sûr de vouloir supprimer cette transaction ?")) {
+      const newData = {
+        ...data,
+        transactions: data.transactions.filter((t) => t.id !== transactionId),
+      };
+      onUpdateData(newData);
+    }
+  };
+
+  const transactionsFiltrees = useMemo(() => {
+    return data.transactions
+      .filter((t) => {
+        const matchCategorie =
+          filtreCategorie === "all" || t.categorie === filtreCategorie;
+        const matchType = filtreType === "all" || t.type === filtreType;
+        const matchSearch =
+          searchTerm === "" ||
+          t.description.toLowerCase().includes(searchTerm.toLowerCase()) ||
+          t.categorie.toLowerCase().includes(searchTerm.toLowerCase());
+        return matchCategorie && matchType && matchSearch;
+      })
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  }, [data.transactions, filtreCategorie, filtreType, searchTerm]);
+
+  const categoriesDisponibles = useMemo(() => {
+    return formData.type === "entree"
+      ? data.categories.filter((c) => c.type === "entree")
+      : data.categories.filter((c) => c.type === "depense");
+  }, [data.categories, formData.type]);
+
+  return (
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <div>
+          <h1 className="text-3xl font-bold text-gray-900">Transactions</h1>
+          <p className="text-gray-600">Suivez toutes vos entrées et dépenses</p>
+        </div>
+        <Button onClick={() => setShowModal(true)}>
+          <Plus className="w-4 h-4 mr-2" />
+          Ajouter une transaction
+        </Button>
+      </div>
+
+      {/* Filtres et recherche */}
+      <Card>
+        <div className="flex flex-col lg:flex-row gap-4">
+          <div className="flex-1">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
+              <input
+                type="text"
+                placeholder="Rechercher dans les transactions..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="pl-10 pr-4 py-2 w-full border border-gray-300 rounded-md focus:ring-2 focus:ring-emerald-500"
+              />
+            </div>
+          </div>
+          <select
+            value={filtreType}
+            onChange={(e) => setFiltreType(e.target.value)}
+            className="border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-emerald-500"
+          >
+            <option value="all">Tous les types</option>
+            <option value="entree">Entrées</option>
+            <option value="depense">Dépenses</option>
+          </select>
+          <select
+            value={filtreCategorie}
+            onChange={(e) => setFiltreCategorie(e.target.value)}
+            className="border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-emerald-500"
+          >
+            <option value="all">Toutes les catégories</option>
+            {data.categories.map((cat) => (
+              <option key={cat.id} value={cat.nom}>
+                {cat.nom}
+              </option>
+            ))}
+          </select>
+        </div>
+      </Card>
+
+      {/* Liste des transactions */}
+      <Card>
+        <h3 className="text-lg font-semibold mb-4">
+          Transactions ({transactionsFiltrees.length})
+        </h3>
+        {transactionsFiltrees.length > 0 ? (
+          <div className="space-y-3">
+            {transactionsFiltrees.map((transaction) => {
+              const compte = data.comptes.find(
+                (c) => c.id === transaction.compte
+              );
+              const categorie = data.categories.find(
+                (c) => c.nom === transaction.categorie
+              );
+
+              return (
+                <div
+                  key={transaction.id}
+                  className="flex items-center justify-between p-4 border rounded-lg hover:bg-gray-50"
+                >
+                  <div className="flex items-center gap-4 flex-1">
+                    <div
+                      className="w-3 h-3 rounded-full"
+                      style={{ backgroundColor: categorie?.couleur || "#gray" }}
+                    />
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2">
+                        <h4 className="font-semibold text-gray-900">
+                          {transaction.description}
+                        </h4>
+                        {transaction.recurrente && (
+                          <RefreshCw
+                            className="w-3 h-3 text-blue-500"
+                            title="Transaction récurrente"
+                          />
+                        )}
+                      </div>
+                      <p className="text-sm text-gray-600">
+                        {transaction.categorie} •{" "}
+                        {compte?.nom || "Compte inconnu"}
+                      </p>
+                      <p className="text-xs text-gray-500">
+                        {formatDate(transaction.date)}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-4">
+                    <div
+                      className={`text-lg font-semibold ${
+                        transaction.montant >= 0
+                          ? "text-green-600"
+                          : "text-red-600"
+                      }`}
+                    >
+                      {transaction.montant >= 0 ? "+" : ""}
+                      {formatCurrency(
+                        transaction.montant,
+                        data.settings.devise
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => handleEdit(transaction)}
+                        className="p-2 text-blue-600 hover:bg-blue-100 rounded-md transition-colors"
+                        title="Modifier"
+                      >
+                        <Edit className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={() => handleDelete(transaction.id)}
+                        className="p-2 text-red-600 hover:bg-red-100 rounded-md transition-colors"
+                        title="Supprimer"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="text-center py-8 text-gray-500">
+            <Receipt className="w-16 h-16 mx-auto mb-4 opacity-50" />
+            <p className="text-lg">Aucune transaction trouvée</p>
+            <p className="text-sm">
+              {searchTerm || filtreCategorie !== "all" || filtreType !== "all"
+                ? "Essayez de modifier vos filtres"
+                : "Commencez par ajouter votre première transaction"}
+            </p>
+          </div>
+        )}
+      </Card>
+
+      {/* Modal d'ajout/modification */}
+      <Modal
+        isOpen={showModal}
+        onClose={() => {
+          setShowModal(false);
+          resetForm();
+        }}
+        title={
+          editingTransaction
+            ? "Modifier la transaction"
+            : "Ajouter une transaction"
+        }
+      >
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Type de transaction
+            </label>
+            <select
+              value={formData.type}
+              onChange={(e) =>
+                setFormData({
+                  ...formData,
+                  type: e.target.value as Transaction["type"],
+                  categorie: "",
+                })
+              }
+              className="w-full border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-emerald-500"
+            >
+              <option value="depense">Dépense</option>
+              <option value="entree">Entrée</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Montant ({data.settings.devise})
+            </label>
+            <input
+              type="number"
+              step="0.01"
+              value={formData.montant}
+              onChange={(e) =>
+                setFormData({
+                  ...formData,
+                  montant: parseFloat(e.target.value) || 0,
+                })
+              }
+              className="w-full border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-emerald-500"
+              placeholder="0.00"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Catégorie
+            </label>
+            <select
+              value={formData.categorie}
+              onChange={(e) =>
+                setFormData({ ...formData, categorie: e.target.value })
+              }
+              className="w-full border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-emerald-500"
+            >
+              <option value="">Sélectionner une catégorie</option>
+              {categoriesDisponibles.map((cat) => (
+                <option key={cat.id} value={cat.nom}>
+                  {cat.nom}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Description
+            </label>
+            <input
+              type="text"
+              value={formData.description}
+              onChange={(e) =>
+                setFormData({ ...formData, description: e.target.value })
+              }
+              className="w-full border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-emerald-500"
+              placeholder="Ex: Courses alimentaires"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Compte
+            </label>
+            <select
+              value={formData.compte}
+              onChange={(e) =>
+                setFormData({ ...formData, compte: e.target.value })
+              }
+              className="w-full border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-emerald-500"
+            >
+              <option value="">Sélectionner un compte</option>
+              {data.comptes
+                .filter((c) => c.actif)
+                .map((compte) => (
+                  <option key={compte.id} value={compte.id}>
+                    {compte.nom}
+                  </option>
+                ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Date
+            </label>
+            <input
+              type="date"
+              value={formData.date}
+              onChange={(e) =>
+                setFormData({ ...formData, date: e.target.value })
+              }
+              className="w-full border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-emerald-500"
+            />
+          </div>
+
+          <div className="flex items-center">
+            <input
+              type="checkbox"
+              id="recurrente"
+              checked={formData.recurrente}
+              onChange={(e) =>
+                setFormData({ ...formData, recurrente: e.target.checked })
+              }
+              className="mr-2"
+            />
+            <label htmlFor="recurrente" className="text-sm text-gray-700">
+              Transaction récurrente
+            </label>
+          </div>
+
+          <div className="flex justify-end gap-3">
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setShowModal(false);
+                resetForm();
+              }}
+            >
+              Annuler
+            </Button>
+            <Button onClick={handleSubmit}>
+              {editingTransaction ? "Modifier" : "Ajouter"}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+    </div>
+  );
+};
+
+// ==================== MAIN APP COMPONENT ====================
+const BudgetPlannerSimple: React.FC = () => {
+  const [data, setData] = useState<AppData>(DONNEES_DEMO);
+  const [currentPage, setCurrentPage] = useState("banking");
+  const [showMobileMenu, setShowMobileMenu] = useState(false);
+
+  useEffect(() => {
+    const savedData = loadFromMemory();
+    setData(savedData);
+  }, []);
+
+  useEffect(() => {
+    const timeoutId = setTimeout(() => {
+      saveToMemory(data);
+    }, 1000);
+
+    return () => clearTimeout(timeoutId);
+  }, [data]);
+
+  // Navigation avec Dashboard en premier
+  const navigation = [
+    { id: "dashboard", name: "Dashboard", icon: Home },
+    { id: "banking", name: "Comptes", icon: Building2 },
+    { id: "transactions", name: "Transactions", icon: Receipt },
+    { id: "budget", name: "Budget Prévisionnel", icon: Calendar },
+  ];
+
+  const handleNavigate = (page: string) => {
+    setCurrentPage(page);
+    setShowMobileMenu(false);
+  };
+
+  const renderCurrentPage = () => {
+    switch (currentPage) {
+      case "dashboard":
+        return <Dashboard data={data} onUpdateData={setData} />;
+      case "banking":
+        return <ComptesPage data={data} onUpdateData={setData} />;
+      case "transactions":
+        return <TransactionsPage data={data} onUpdateData={setData} />;
+      case "budget":
+        return <BudgetPrevisionnelPage data={data} onUpdateData={setData} />;
+      default:
+        return <ComptesPage data={data} onUpdateData={setData} />;
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-50">
+      {/* Mobile menu */}
+      <div className="lg:hidden bg-white border-b border-gray-200 p-4">
+        <div className="flex items-center justify-between">
+          <h1 className="text-xl font-bold text-emerald-600">
+            Budget Simplifié
+          </h1>
+          <button
+            onClick={() => setShowMobileMenu(!showMobileMenu)}
+            className="p-2 text-gray-600 hover:text-gray-900 transition-colors"
+          >
+            {showMobileMenu ? (
+              <X className="w-6 h-6" />
+            ) : (
+              <MoreHorizontal className="w-6 h-6" />
+            )}
+          </button>
+        </div>
+
+        {showMobileMenu && (
+          <div className="mt-4 space-y-2">
+            {navigation.map((item) => {
+              const IconComponent = item.icon;
+              return (
+                <button
+                  key={item.id}
+                  onClick={() => handleNavigate(item.id)}
+                  className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg transition-colors ${
+                    currentPage === item.id
+                      ? "bg-emerald-100 text-emerald-600 font-medium"
+                      : "text-gray-700 hover:bg-gray-100"
+                  }`}
+                >
+                  <IconComponent className="w-5 h-5" />
+                  {item.name}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      <div className="flex">
+        {/* Desktop sidebar */}
+        <div className="hidden lg:flex lg:flex-shrink-0">
+          <div className="w-64 bg-white border-r border-gray-200 min-h-screen">
+            <div className="p-6">
+              <h1 className="text-2xl font-bold text-emerald-600">
+                Budget Simplifié
+              </h1>
+              <p className="text-xs text-gray-500 mt-1">
+                Version complète • Export Excel/PDF
+              </p>
+            </div>
+
+            <nav className="px-4 space-y-1">
+              {navigation.map((item) => {
+                const IconComponent = item.icon;
+                return (
+                  <button
+                    key={item.id}
+                    onClick={() => handleNavigate(item.id)}
+                    className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg transition-colors ${
+                      currentPage === item.id
+                        ? "bg-emerald-100 text-emerald-600 font-medium"
+                        : "text-gray-700 hover:bg-gray-100"
+                    }`}
+                  >
+                    <IconComponent className="w-5 h-5" />
+                    {item.name}
+                  </button>
+                );
+              })}
+            </nav>
+
+            {/* Quick summary in sidebar */}
+            <div className="p-4 mt-8">
+              <div className="bg-gray-50 rounded-lg p-4">
+                <h4 className="font-semibold text-gray-900 mb-3">
+                  Résumé Rapide
+                </h4>
+                <div className="space-y-2 text-sm">
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Solde total</span>
+                    <span className="font-medium">
+                      {formatCurrency(
+                        calculateurs.soldeTotalComptes(data.comptes),
+                        data.settings.devise
+                      )}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Ce mois</span>
+                    <span
+                      className={`font-medium ${
+                        calculateurs.entreesMois(data.transactions) -
+                          calculateurs.depensesMois(data.transactions) >=
+                        0
+                          ? "text-green-600"
+                          : "text-red-600"
+                      }`}
+                    >
+                      {formatCurrency(
+                        calculateurs.entreesMois(data.transactions) -
+                          calculateurs.depensesMois(data.transactions),
+                        data.settings.devise
+                      )}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Comptes actifs</span>
+                    <span className="font-medium">
+                      {data.comptes.filter((c) => c.actif).length}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Main content */}
+        <div className="flex-1 min-h-screen">
+          <main className="p-4 lg:p-8">{renderCurrentPage()}</main>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default BudgetPlannerSimple;
